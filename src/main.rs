@@ -27,9 +27,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::create_pool(&config.database_url).await?;
     tracing::info!("Database connection established");
 
-    // Run migrations
-    db::run_migrations(&pool).await?;
-    tracing::info!("Database migrations complete");
+    tracing::info!("Database ready");
 
     // Load JMdict dictionary
     if let Err(e) = dictionary::load_dictionary() {
