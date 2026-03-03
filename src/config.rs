@@ -6,6 +6,7 @@ pub struct Config {
     pub port: u16,
     pub supabase_jwt_secret: String,
     pub allowed_origins: Vec<String>,
+    pub openai_api_key: Option<String>,
 }
 
 impl Config {
@@ -27,6 +28,7 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            openai_api_key: env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()),
         })
     }
 }
