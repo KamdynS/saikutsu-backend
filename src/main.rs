@@ -1,4 +1,5 @@
 use axum::{
+    extract::DefaultBodyLimit,
     middleware,
     routing::{delete, get, patch, post},
     Router,
@@ -79,9 +80,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/reviews", post(api::reviews::submit))
         // Export
         .route("/v1/decks/{id}/export", post(api::exports::export_apkg))
-        // PDF Analysis (endpoints that create decks need auth)
+        // Analysis (endpoints that create decks need auth)
         .route("/v1/decks/from-pdf", post(api::analyze::create_deck_from_pdf))
         .route("/v1/decks/from-text", post(api::analyze::create_deck_from_text))
+        .route("/v1/decks/from-media", post(api::analyze::create_deck_from_media))
+        .layer(DefaultBodyLimit::max(500 * 1024 * 1024)) // 500MB for video uploads
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api::middleware::auth_middleware,

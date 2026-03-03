@@ -10,7 +10,7 @@ use crate::{
     api::middleware::AuthUser,
     error::{AppError, AppResult},
     models::{Card, Deck, DeckResponse, Sentence},
-    processing::{dictionary, frequency, pdf, tokenizers::{EuropeanTokenizer, JapaneseTokenizer, Token}},
+    processing::{dictionary, frequency, pdf, transcription, tokenizers::{EuropeanTokenizer, JapaneseTokenizer, Token}},
     AppState,
 };
 
@@ -519,6 +519,149 @@ pub async fn create_deck_from_pdf(
     tracing::info!(
         "Created deck '{}' ({}) with {} cards and {} sentences",
         deck_name, language, cards_created, sentences_created
+    );
+
+    Ok(Json(CreateDeckResult {
+        deck: deck.into(),
+        cards_created,
+        sentences_created,
+    }))
+}
+
+/// Create a deck from an uploaded video or audio file
+pub async fn create_deck_from_media(
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
+    mut multipart: Multipart,
+) -> AppResult<Json<CreateDeckResult>> {
+    let api_key = state.config.openai_api_key.as_deref().ok_or_else(|| {
+        AppError::BadRequest("OPENAI_API_KEY is not configured. Media transcription requires an OpenAI API key.".to_string())
+    })?;
+
+    let mut filename: Option<String> = None;
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut deck_name: Option<String> = None;
+    let mut max_words: usize = 500;
+    let mut language_hint: Option<String> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let field_name = field.name().map(|s| s.to_string());
+        let file_name = field.file_name().map(|s| s.to_string());
+
+        match field_name.as_deref() {
+            Some("file") => {
+                filename = file_name;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read file: {}", e)))?;
+                file_bytes = Some(bytes.to_vec());
+            }
+            Some("name") => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read name: {}", e)))?;
+                deck_name = Some(text);
+            }
+            Some("max_words") => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read max_words: {}", e)))?;
+                max_words = text.parse().unwrap_or(500);
+            }
+            Some("language") => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read language: {}", e)))?;
+                language_hint = Some(text);
+            }
+            _ => {}
+        }
+    }
+
+    let filename = filename.ok_or_else(|| AppError::BadRequest("No file provided".to_string()))?;
+    let file_bytes = file_bytes.ok_or_else(|| AppError::BadRequest("No file data".to_string()))?;
+
+    if !transcription::is_media(&filename) {
+        return Err(AppError::BadRequest(
+            "Unsupported file type. Supported: mp4, mkv, webm, mov, mp3, m4a, wav, ogg, flac".to_string(),
+        ));
+    }
+
+    let source_type = if transcription::is_video(&filename) { "video" } else { "audio" };
+    let deck_name = deck_name.unwrap_or_else(|| {
+        let stem = std::path::Path::new(&filename)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| filename.clone());
+        stem
+    });
+
+    tracing::info!("Transcribing {} file: {}", source_type, filename);
+
+    let (transcript, duration) = transcription::transcribe_media(
+        &file_bytes,
+        &filename,
+        language_hint.as_deref(),
+        api_key,
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Transcription failed: {}", e)))?;
+
+    tracing::info!(
+        "Transcription complete: {:.0}s duration, {} chars",
+        duration,
+        transcript.len()
+    );
+
+    if transcript.trim().is_empty() {
+        return Err(AppError::BadRequest("Transcription produced no text. The file may contain no speech.".to_string()));
+    }
+
+    let language = detect_language(&transcript, language_hint.as_deref());
+
+    let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences) =
+        analyze_text_core(&transcript, &language)?;
+
+    let freq_map = frequency::count_lemmas(&all_tokens);
+
+    let mut words: Vec<(String, i32)> = freq_map
+        .iter()
+        .map(|(lemma, wf)| (lemma.clone(), wf.doc_count))
+        .collect();
+    words.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let deck = sqlx::query_as::<_, Deck>(
+        r#"
+        INSERT INTO decks (user_id, name, description, language, source_type)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING *
+        "#,
+    )
+    .bind(auth_user.user_id)
+    .bind(&deck_name)
+    .bind(format!(
+        "Transcribed from {} ({:.0}s) - {} words",
+        filename,
+        duration,
+        words.len().min(max_words)
+    ))
+    .bind(&language)
+    .bind(source_type)
+    .fetch_one(&state.db)
+    .await?;
+
+    let (cards_created, sentences_created) = create_cards_from_analysis(
+        &state, &auth_user, &deck, &words, max_words,
+        &surface_forms, &pos_map, &lemma_sentences, &language,
+    ).await?;
+
+    tracing::info!(
+        "Created deck '{}' ({}) from {} with {} cards and {} sentences",
+        deck_name, language, source_type, cards_created, sentences_created
     );
 
     Ok(Json(CreateDeckResult {
