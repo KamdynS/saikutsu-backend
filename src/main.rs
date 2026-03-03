@@ -64,7 +64,6 @@ async fn main() -> anyhow::Result<()> {
         // Decks
         .route("/v1/decks", get(api::decks::list))
         .route("/v1/decks", post(api::decks::create))
-        .route("/v1/decks/frequency", post(api::decks::start_frequency))
         .route("/v1/decks/{id}", get(api::decks::get))
         .route("/v1/decks/{id}", patch(api::decks::update))
         .route("/v1/decks/{id}", delete(api::decks::delete))
