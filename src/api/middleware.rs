@@ -48,16 +48,10 @@ pub async fn fetch_jwks_keys(
     jwks_url: &str,
 ) -> anyhow::Result<Vec<(Option<String>, DecodingKey)>> {
     let response = reqwest::get(jwks_url).await?;
-    let status = response.status();
-    let body = response.text().await?;
-    tracing::info!("JWKS response status={}, body_len={}, body={}", status, body.len(), &body[..body.len().min(500)]);
-
-    let jwks: JwksResponse = serde_json::from_str(&body)?;
-    tracing::info!("Parsed {} keys from JWKS", jwks.keys.len());
+    let jwks: JwksResponse = response.json().await?;
 
     let mut keys = Vec::new();
     for key in &jwks.keys {
-        tracing::info!("JWKS key: kty={}, kid={:?}, has_x={}, has_y={}", key.kty, key.kid, key.x.is_some(), key.y.is_some());
         if key.kty == "EC" {
             if let (Some(x), Some(y)) = (&key.x, &key.y) {
                 match DecodingKey::from_ec_components(x, y) {
