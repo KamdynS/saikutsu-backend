@@ -14,6 +14,13 @@ use crate::{
     AppState,
 };
 
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeckType {
+    WordDefinition,
+    IPlusOne,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AnalyzeTextRequest {
     pub text: String,
@@ -25,8 +32,12 @@ pub struct AnalyzeTextRequest {
 pub struct CreateDeckFromTextRequest {
     pub text: String,
     pub name: String,
-    pub max_words: Option<usize>,
+    #[serde(default)]
+    pub deck_types: Vec<DeckType>,
     pub language: Option<String>,
+    // Kept for backward compat, ignored
+    #[allow(dead_code)]
+    pub max_words: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,11 +165,12 @@ fn split_sentences_european(text: &str) -> Vec<String> {
     sentences
 }
 
-/// Core analysis logic shared by PDF and text analysis
+/// Core analysis logic shared by PDF and text analysis.
+/// Returns: (tokens, sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas)
 fn analyze_text_core(
     full_text: &str,
     language: &str,
-) -> Result<(Vec<Token>, Vec<String>, HashMap<String, Vec<String>>, HashMap<String, String>, HashMap<String, Vec<String>>), AppError> {
+) -> Result<(Vec<Token>, Vec<String>, HashMap<String, Vec<String>>, HashMap<String, String>, HashMap<String, Vec<String>>, HashMap<String, HashSet<String>>), AppError> {
     let sentences = split_sentences(full_text, language);
 
     let all_tokens = tokenize_text(full_text, language)?;
@@ -182,8 +194,9 @@ fn analyze_text_core(
         forms.dedup();
     }
 
-    // Build lemma → sentences mapping
+    // Build lemma → sentences mapping AND sentence → content lemmas mapping
     let mut lemma_sentences: HashMap<String, Vec<String>> = HashMap::new();
+    let mut sentence_content_lemmas: HashMap<String, HashSet<String>> = HashMap::new();
 
     for sentence in &sentences {
         let sentence_tokens = tokenize_text(sentence, language)?;
@@ -198,6 +211,8 @@ fn analyze_text_core(
                     .push(sentence.clone());
             }
         }
+
+        sentence_content_lemmas.insert(sentence.clone(), seen_lemmas);
     }
 
     // Limit sentences per word
@@ -211,7 +226,7 @@ fn analyze_text_core(
         sents.truncate(3);
     }
 
-    Ok((all_tokens, sentences, surface_forms, pos_map, lemma_sentences))
+    Ok((all_tokens, sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas))
 }
 
 fn build_word_list(
@@ -298,7 +313,7 @@ pub async fn analyze_pdf(mut multipart: Multipart) -> AppResult<Json<AnalysisRes
     let text_length = full_text.len();
     let sample_text: String = full_text.chars().take(500).collect();
 
-    let (all_tokens, sentences, surface_forms, pos_map, lemma_sentences) =
+    let (all_tokens, sentences, surface_forms, pos_map, lemma_sentences, _sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
 
     let total_tokens = all_tokens.len();
@@ -334,7 +349,7 @@ pub async fn analyze_text(
     let text_length = full_text.len();
     let sample_text: String = full_text.chars().take(500).collect();
 
-    let (all_tokens, sentences, surface_forms, pos_map, lemma_sentences) =
+    let (all_tokens, sentences, surface_forms, pos_map, lemma_sentences, _sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
 
     let total_tokens = all_tokens.len();
@@ -361,6 +376,19 @@ pub struct CreateDeckResult {
     pub deck: DeckResponse,
     pub cards_created: usize,
     pub sentences_created: usize,
+    pub i_plus_one_found: usize,
+    pub words_skipped_duplicate: usize,
+}
+
+/// Parse deck_types from a comma-separated string (for multipart forms)
+fn parse_deck_types(s: &str) -> Vec<DeckType> {
+    s.split(',')
+        .filter_map(|t| match t.trim() {
+            "word_definition" => Some(DeckType::WordDefinition),
+            "i_plus_one" => Some(DeckType::IPlusOne),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Create a deck from raw text
@@ -371,7 +399,11 @@ pub async fn create_deck_from_text(
 ) -> AppResult<Json<CreateDeckResult>> {
     let full_text = req.text;
     let deck_name = req.name;
-    let max_words = req.max_words.unwrap_or(500);
+    let deck_types = if req.deck_types.is_empty() {
+        vec![DeckType::WordDefinition]
+    } else {
+        req.deck_types
+    };
 
     if full_text.trim().is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".to_string()));
@@ -379,7 +411,7 @@ pub async fn create_deck_from_text(
 
     let language = detect_language(&full_text, req.language.as_deref());
 
-    let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences) =
+    let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
 
     let freq_map = frequency::count_lemmas(&all_tokens);
@@ -390,35 +422,51 @@ pub async fn create_deck_from_text(
         .collect();
     words.sort_by(|a, b| b.1.cmp(&a.1));
 
+    let study_mode = if deck_types.contains(&DeckType::IPlusOne) || deck_types.contains(&DeckType::WordDefinition) && deck_types.contains(&DeckType::IPlusOne) {
+        "cloze"
+    } else {
+        "flashcard"
+    };
+
+    let settings = serde_json::json!({
+        "new_cards_per_day": 20,
+        "study_mode": study_mode
+    });
+
     // Create the deck with detected language
     let deck = sqlx::query_as::<_, Deck>(
         r#"
-        INSERT INTO decks (user_id, name, description, language, source_type)
-        VALUES ($1, $2, $3, $4, 'text')
+        INSERT INTO decks (user_id, name, description, language, source_type, settings)
+        VALUES ($1, $2, $3, $4, 'text', $5)
         RETURNING *
         "#,
     )
     .bind(auth_user.user_id)
     .bind(&deck_name)
-    .bind(format!("{} words from pasted text", words.len().min(max_words)))
+    .bind(format!("{} words from pasted text", words.len()))
     .bind(&language)
+    .bind(&settings)
     .fetch_one(&state.db)
     .await?;
 
-    let (cards_created, sentences_created) = create_cards_from_analysis(
-        &state, &auth_user, &deck, &words, max_words,
-        &surface_forms, &pos_map, &lemma_sentences, &language,
+    let result = create_cards_from_analysis(
+        &state, &auth_user, &deck, &words,
+        &deck_types, &surface_forms, &pos_map, &lemma_sentences,
+        &sentence_content_lemmas, &language,
     ).await?;
 
     tracing::info!(
-        "Created deck '{}' ({}) with {} cards and {} sentences",
-        deck_name, language, cards_created, sentences_created
+        "Created deck '{}' ({}) with {} cards and {} sentences ({} i+1, {} skipped)",
+        deck_name, language, result.cards_created, result.sentences_created,
+        result.i_plus_one_found, result.words_skipped_duplicate
     );
 
     Ok(Json(CreateDeckResult {
         deck: deck.into(),
-        cards_created,
-        sentences_created,
+        cards_created: result.cards_created,
+        sentences_created: result.sentences_created,
+        i_plus_one_found: result.i_plus_one_found,
+        words_skipped_duplicate: result.words_skipped_duplicate,
     }))
 }
 
@@ -431,7 +479,7 @@ pub async fn create_deck_from_pdf(
     let mut filename: Option<String> = None;
     let mut pdf_bytes: Option<Vec<u8>> = None;
     let mut deck_name: Option<String> = None;
-    let mut max_words: usize = 500;
+    let mut deck_types: Vec<DeckType> = Vec::new();
     let mut language_hint: Option<String> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -454,12 +502,12 @@ pub async fn create_deck_from_pdf(
                     .map_err(|e| AppError::BadRequest(format!("Failed to read name: {}", e)))?;
                 deck_name = Some(text);
             }
-            Some("max_words") => {
+            Some("deck_types") => {
                 let text = field
                     .text()
                     .await
-                    .map_err(|e| AppError::BadRequest(format!("Failed to read max_words: {}", e)))?;
-                max_words = text.parse().unwrap_or(500);
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read deck_types: {}", e)))?;
+                deck_types = parse_deck_types(&text);
             }
             Some("language") => {
                 let text = field
@@ -468,8 +516,13 @@ pub async fn create_deck_from_pdf(
                     .map_err(|e| AppError::BadRequest(format!("Failed to read language: {}", e)))?;
                 language_hint = Some(text);
             }
+            // Ignore max_words for backward compat
             _ => {}
         }
+    }
+
+    if deck_types.is_empty() {
+        deck_types = vec![DeckType::WordDefinition];
     }
 
     let filename = filename.ok_or_else(|| AppError::BadRequest("No file provided".to_string()))?;
@@ -486,7 +539,7 @@ pub async fn create_deck_from_pdf(
     let full_text: String = pages.iter().map(|p| p.text.clone()).collect::<Vec<_>>().join("\n");
     let language = detect_language(&full_text, language_hint.as_deref());
 
-    let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences) =
+    let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
 
     let freq_map = frequency::count_lemmas(&all_tokens);
@@ -497,34 +550,50 @@ pub async fn create_deck_from_pdf(
         .collect();
     words.sort_by(|a, b| b.1.cmp(&a.1));
 
+    let study_mode = if deck_types.contains(&DeckType::IPlusOne) {
+        "cloze"
+    } else {
+        "flashcard"
+    };
+
+    let settings = serde_json::json!({
+        "new_cards_per_day": 20,
+        "study_mode": study_mode
+    });
+
     let deck = sqlx::query_as::<_, Deck>(
         r#"
-        INSERT INTO decks (user_id, name, description, language, source_type)
-        VALUES ($1, $2, $3, $4, 'pdf')
+        INSERT INTO decks (user_id, name, description, language, source_type, settings)
+        VALUES ($1, $2, $3, $4, 'pdf', $5)
         RETURNING *
         "#,
     )
     .bind(auth_user.user_id)
     .bind(&deck_name)
-    .bind(format!("Generated from {} - {} words", filename, words.len().min(max_words)))
+    .bind(format!("Generated from {} - {} words", filename, words.len()))
     .bind(&language)
+    .bind(&settings)
     .fetch_one(&state.db)
     .await?;
 
-    let (cards_created, sentences_created) = create_cards_from_analysis(
-        &state, &auth_user, &deck, &words, max_words,
-        &surface_forms, &pos_map, &lemma_sentences, &language,
+    let result = create_cards_from_analysis(
+        &state, &auth_user, &deck, &words,
+        &deck_types, &surface_forms, &pos_map, &lemma_sentences,
+        &sentence_content_lemmas, &language,
     ).await?;
 
     tracing::info!(
-        "Created deck '{}' ({}) with {} cards and {} sentences",
-        deck_name, language, cards_created, sentences_created
+        "Created deck '{}' ({}) with {} cards and {} sentences ({} i+1, {} skipped)",
+        deck_name, language, result.cards_created, result.sentences_created,
+        result.i_plus_one_found, result.words_skipped_duplicate
     );
 
     Ok(Json(CreateDeckResult {
         deck: deck.into(),
-        cards_created,
-        sentences_created,
+        cards_created: result.cards_created,
+        sentences_created: result.sentences_created,
+        i_plus_one_found: result.i_plus_one_found,
+        words_skipped_duplicate: result.words_skipped_duplicate,
     }))
 }
 
@@ -541,7 +610,7 @@ pub async fn create_deck_from_media(
     let mut filename: Option<String> = None;
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut deck_name: Option<String> = None;
-    let mut max_words: usize = 500;
+    let mut deck_types: Vec<DeckType> = Vec::new();
     let mut language_hint: Option<String> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -564,12 +633,12 @@ pub async fn create_deck_from_media(
                     .map_err(|e| AppError::BadRequest(format!("Failed to read name: {}", e)))?;
                 deck_name = Some(text);
             }
-            Some("max_words") => {
+            Some("deck_types") => {
                 let text = field
                     .text()
                     .await
-                    .map_err(|e| AppError::BadRequest(format!("Failed to read max_words: {}", e)))?;
-                max_words = text.parse().unwrap_or(500);
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read deck_types: {}", e)))?;
+                deck_types = parse_deck_types(&text);
             }
             Some("language") => {
                 let text = field
@@ -578,8 +647,13 @@ pub async fn create_deck_from_media(
                     .map_err(|e| AppError::BadRequest(format!("Failed to read language: {}", e)))?;
                 language_hint = Some(text);
             }
+            // Ignore max_words for backward compat
             _ => {}
         }
+    }
+
+    if deck_types.is_empty() {
+        deck_types = vec![DeckType::WordDefinition];
     }
 
     let filename = filename.ok_or_else(|| AppError::BadRequest("No file provided".to_string()))?;
@@ -623,7 +697,7 @@ pub async fn create_deck_from_media(
 
     let language = detect_language(&transcript, language_hint.as_deref());
 
-    let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences) =
+    let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&transcript, &language)?;
 
     let freq_map = frequency::count_lemmas(&all_tokens);
@@ -634,10 +708,21 @@ pub async fn create_deck_from_media(
         .collect();
     words.sort_by(|a, b| b.1.cmp(&a.1));
 
+    let study_mode = if deck_types.contains(&DeckType::IPlusOne) {
+        "cloze"
+    } else {
+        "flashcard"
+    };
+
+    let settings = serde_json::json!({
+        "new_cards_per_day": 20,
+        "study_mode": study_mode
+    });
+
     let deck = sqlx::query_as::<_, Deck>(
         r#"
-        INSERT INTO decks (user_id, name, description, language, source_type)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO decks (user_id, name, description, language, source_type, settings)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING *
         "#,
     )
@@ -647,28 +732,40 @@ pub async fn create_deck_from_media(
         "Transcribed from {} ({:.0}s) - {} words",
         filename,
         duration,
-        words.len().min(max_words)
+        words.len()
     ))
     .bind(&language)
     .bind(source_type)
+    .bind(&settings)
     .fetch_one(&state.db)
     .await?;
 
-    let (cards_created, sentences_created) = create_cards_from_analysis(
-        &state, &auth_user, &deck, &words, max_words,
-        &surface_forms, &pos_map, &lemma_sentences, &language,
+    let result = create_cards_from_analysis(
+        &state, &auth_user, &deck, &words,
+        &deck_types, &surface_forms, &pos_map, &lemma_sentences,
+        &sentence_content_lemmas, &language,
     ).await?;
 
     tracing::info!(
-        "Created deck '{}' ({}) from {} with {} cards and {} sentences",
-        deck_name, language, source_type, cards_created, sentences_created
+        "Created deck '{}' ({}) from {} with {} cards and {} sentences ({} i+1, {} skipped)",
+        deck_name, language, source_type, result.cards_created, result.sentences_created,
+        result.i_plus_one_found, result.words_skipped_duplicate
     );
 
     Ok(Json(CreateDeckResult {
         deck: deck.into(),
-        cards_created,
-        sentences_created,
+        cards_created: result.cards_created,
+        sentences_created: result.sentences_created,
+        i_plus_one_found: result.i_plus_one_found,
+        words_skipped_duplicate: result.words_skipped_duplicate,
     }))
+}
+
+struct CardCreationResult {
+    cards_created: usize,
+    sentences_created: usize,
+    i_plus_one_found: usize,
+    words_skipped_duplicate: usize,
 }
 
 /// Shared logic for creating cards from analyzed text
@@ -677,16 +774,88 @@ async fn create_cards_from_analysis(
     auth_user: &AuthUser,
     deck: &Deck,
     words: &[(String, i32)],
-    max_words: usize,
+    deck_types: &[DeckType],
     surface_forms: &HashMap<String, Vec<String>>,
     pos_map: &HashMap<String, String>,
     lemma_sentences: &HashMap<String, Vec<String>>,
+    sentence_content_lemmas: &HashMap<String, HashSet<String>>,
     language: &str,
-) -> AppResult<(usize, usize)> {
+) -> AppResult<CardCreationResult> {
+    // Query existing lemmas the user already has cards for in this language
+    let existing_lemmas: HashSet<String> = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT c.lemma FROM cards c
+        JOIN decks d ON c.deck_id = d.id
+        WHERE d.user_id = $1 AND d.language = $2
+        "#,
+    )
+    .bind(auth_user.user_id)
+    .bind(language)
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .collect();
+
+    let want_word_def = deck_types.contains(&DeckType::WordDefinition);
+    let want_i_plus_one = deck_types.contains(&DeckType::IPlusOne);
+
+    // Build i+1 map: lemma → Vec<(sentence, cloze_text, cloze_answer)>
+    let mut i_plus_one_map: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+    let mut i_plus_one_found: usize = 0;
+
+    if want_i_plus_one {
+        // Collect all lemmas from the new word list (not yet in existing_lemmas)
+        let new_lemmas: HashSet<&str> = words.iter()
+            .map(|(lemma, _)| lemma.as_str())
+            .filter(|l| !existing_lemmas.contains(*l))
+            .collect();
+
+        for (sentence, content_lemmas) in sentence_content_lemmas {
+            // Count how many content lemmas in this sentence are unknown
+            let unknown_lemmas: Vec<&String> = content_lemmas.iter()
+                .filter(|l| !existing_lemmas.contains(l.as_str()) && new_lemmas.contains(l.as_str()))
+                .collect();
+
+            if unknown_lemmas.len() == 1 {
+                i_plus_one_found += 1;
+                let unknown_lemma = unknown_lemmas[0].clone();
+                let word_surfaces = surface_forms.get(&unknown_lemma).cloned().unwrap_or_default();
+
+                let mut cloze_text = sentence.clone();
+                let mut cloze_answer = unknown_lemma.clone();
+
+                for surface in &word_surfaces {
+                    if sentence.contains(surface) {
+                        cloze_text = sentence.replace(surface, "＿＿＿");
+                        cloze_answer = surface.clone();
+                        break;
+                    }
+                }
+
+                let entry = i_plus_one_map.entry(unknown_lemma).or_default();
+                if entry.len() < 3 {
+                    entry.push((sentence.clone(), cloze_text, cloze_answer));
+                }
+            }
+        }
+    }
+
     let mut cards_created = 0;
     let mut sentences_created = 0;
+    let mut words_skipped_duplicate = 0;
 
-    for (rank, (lemma, count)) in words.iter().take(max_words).enumerate() {
+    for (rank, (lemma, count)) in words.iter().enumerate() {
+        // Skip words the user already has
+        if existing_lemmas.contains(lemma) {
+            words_skipped_duplicate += 1;
+            continue;
+        }
+
+        // In i+1-only mode, skip words that don't appear in any i+1 sentence
+        if want_i_plus_one && !want_word_def && !i_plus_one_map.contains_key(lemma) {
+            continue;
+        }
+
         // For Japanese, look up definitions from JMdict
         let (definitions, reading, pos) = if is_japanese(language) {
             let dict_entry = dictionary::lookup(lemma);
@@ -733,39 +902,70 @@ async fn create_cards_from_analysis(
             .execute(&state.db)
             .await?;
 
-        let word_sentences = lemma_sentences.get(lemma).cloned().unwrap_or_default();
-        let word_surfaces = surface_forms.get(lemma).cloned().unwrap_or_default();
+        // Determine which sentences to attach
+        if want_i_plus_one {
+            // Use i+1 sentences if available
+            if let Some(i1_sentences) = i_plus_one_map.get(lemma) {
+                for (i, (sentence, cloze_text, cloze_answer)) in i1_sentences.iter().enumerate() {
+                    sqlx::query_as::<_, Sentence>(
+                        r#"
+                        INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, is_primary)
+                        VALUES ($1, $2, $3, $4, $5)
+                        RETURNING *
+                        "#,
+                    )
+                    .bind(card.id)
+                    .bind(sentence)
+                    .bind(cloze_text)
+                    .bind(cloze_answer)
+                    .bind(i == 0)
+                    .fetch_one(&state.db)
+                    .await?;
 
-        for (i, sentence) in word_sentences.iter().take(3).enumerate() {
-            let mut cloze_text = sentence.clone();
-            let mut cloze_answer = lemma.clone();
-
-            for surface in &word_surfaces {
-                if sentence.contains(surface) {
-                    cloze_text = sentence.replace(surface, "＿＿＿");
-                    cloze_answer = surface.clone();
-                    break;
+                    sentences_created += 1;
                 }
             }
+        } else if want_word_def {
+            // Word/Definition only — attach regular sentences with cloze
+            let word_sentences = lemma_sentences.get(lemma).cloned().unwrap_or_default();
+            let word_surfaces = surface_forms.get(lemma).cloned().unwrap_or_default();
 
-            sqlx::query_as::<_, Sentence>(
-                r#"
-                INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, is_primary)
-                VALUES ($1, $2, $3, $4, $5)
-                RETURNING *
-                "#,
-            )
-            .bind(card.id)
-            .bind(sentence)
-            .bind(&cloze_text)
-            .bind(&cloze_answer)
-            .bind(i == 0)
-            .fetch_one(&state.db)
-            .await?;
+            for (i, sentence) in word_sentences.iter().take(3).enumerate() {
+                let mut cloze_text = sentence.clone();
+                let mut cloze_answer = lemma.clone();
 
-            sentences_created += 1;
+                for surface in &word_surfaces {
+                    if sentence.contains(surface) {
+                        cloze_text = sentence.replace(surface, "＿＿＿");
+                        cloze_answer = surface.clone();
+                        break;
+                    }
+                }
+
+                sqlx::query_as::<_, Sentence>(
+                    r#"
+                    INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, is_primary)
+                    VALUES ($1, $2, $3, $4, $5)
+                    RETURNING *
+                    "#,
+                )
+                .bind(card.id)
+                .bind(sentence)
+                .bind(&cloze_text)
+                .bind(&cloze_answer)
+                .bind(i == 0)
+                .fetch_one(&state.db)
+                .await?;
+
+                sentences_created += 1;
+            }
         }
     }
 
-    Ok((cards_created, sentences_created))
+    Ok(CardCreationResult {
+        cards_created,
+        sentences_created,
+        i_plus_one_found,
+        words_skipped_duplicate,
+    })
 }
