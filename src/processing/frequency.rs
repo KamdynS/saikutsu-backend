@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::normalization::normalize_lemma;
 use super::tokenizers::Token;
 
 #[derive(Debug, Clone)]
@@ -10,7 +11,7 @@ pub struct WordFrequency {
     pub corpus_rank: Option<i32>,
 }
 
-pub fn count_lemmas(tokens: &[Token]) -> HashMap<String, WordFrequency> {
+pub fn count_lemmas(tokens: &[Token], language: &str) -> HashMap<String, WordFrequency> {
     let mut counts: HashMap<String, WordFrequency> = HashMap::new();
 
     for token in tokens {
@@ -18,11 +19,13 @@ pub fn count_lemmas(tokens: &[Token]) -> HashMap<String, WordFrequency> {
             continue;
         }
 
+        let norm = normalize_lemma(&token.lemma, language);
+
         counts
-            .entry(token.lemma.clone())
+            .entry(norm.clone())
             .and_modify(|wf| wf.doc_count += 1)
             .or_insert(WordFrequency {
-                lemma: token.lemma.clone(),
+                lemma: norm,
                 reading: if token.reading.is_empty() {
                     None
                 } else {

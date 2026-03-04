@@ -11,6 +11,8 @@ use crate::{
     api::middleware::AuthUser,
     error::{AppError, AppResult},
     models::{Card, CardListResponse, CardResponse, CardState, CreateCardRequest, Sentence, UpdateCardRequest},
+    processing::normalization::normalize_lemma,
+    services::known_words_service,
     AppState,
 };
 
@@ -126,18 +128,15 @@ pub async fn create(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<CreateCardRequest>,
 ) -> AppResult<Json<CardResponse>> {
-    // Verify deck ownership
-    let deck_exists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM decks WHERE id = $1 AND user_id = $2",
+    // Verify deck ownership and get language
+    let deck_language = sqlx::query_scalar::<_, String>(
+        "SELECT language FROM decks WHERE id = $1 AND user_id = $2",
     )
     .bind(deck_id)
     .bind(auth_user.user_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    if deck_exists == 0 {
-        return Err(AppError::NotFound("Deck not found".to_string()));
-    }
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Deck not found".to_string()))?;
 
     // Create the card
     let card = sqlx::query_as::<_, Card>(
@@ -163,6 +162,10 @@ pub async fn create(
     .bind(card.id)
     .execute(&state.db)
     .await?;
+
+    // Add lemma to known_words
+    let norm = normalize_lemma(&req.lemma, &deck_language);
+    known_words_service::add_known_words(&state.db, auth_user.user_id, &deck_language, &[norm.as_str()]).await?;
 
     // If a sentence was provided, create it
     let sentences = if let Some(sentence_text) = &req.sentence {

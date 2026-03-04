@@ -10,7 +10,8 @@ use crate::{
     api::middleware::AuthUser,
     error::{AppError, AppResult},
     models::{Deck, DeckResponse},
-    processing::{dictionary, frequency, pdf, transcription, tokenizers::{EuropeanTokenizer, JapaneseTokenizer, Token}},
+    processing::{dictionary, frequency, normalization::normalize_lemma, pdf, transcription, tokenizers::{EuropeanTokenizer, JapaneseTokenizer, Token}},
+    services::known_words_service,
     AppState,
 };
 
@@ -177,17 +178,18 @@ fn analyze_text_core(
     // Tokenize full text only ONCE (was previously tokenized again per-sentence)
     let all_tokens = tokenize_text(full_text, language)?;
 
-    // Build surface form and POS mappings
+    // Build surface form and POS mappings (normalized lemma keys)
     let mut surface_forms: HashMap<String, Vec<String>> = HashMap::new();
     let mut pos_map: HashMap<String, String> = HashMap::new();
 
     for token in &all_tokens {
         if token.is_content {
+            let norm = normalize_lemma(&token.lemma, language);
             surface_forms
-                .entry(token.lemma.clone())
+                .entry(norm.clone())
                 .or_default()
                 .push(token.surface.clone());
-            pos_map.entry(token.lemma.clone()).or_insert(token.pos.clone());
+            pos_map.entry(norm).or_insert(token.pos.clone());
         }
     }
 
@@ -197,34 +199,22 @@ fn analyze_text_core(
     }
 
     // Build lemma → sentences and sentence → content lemmas mappings
-    // by checking which surface forms appear in each sentence (no re-tokenization)
+    // using per-sentence tokenization for accurate matching (no false positives from substring matching)
     let mut lemma_sentences: HashMap<String, Vec<String>> = HashMap::new();
     let mut sentence_content_lemmas: HashMap<String, HashSet<String>> = HashMap::new();
 
-    // Build set of content lemmas and their surface forms for matching
     for sentence in &sentences {
-        let mut seen_lemmas: HashSet<String> = HashSet::new();
-        let sentence_lower = sentence.to_lowercase();
-
-        for (lemma, forms) in &surface_forms {
-            // Check if any surface form of this lemma appears in the sentence
-            let found = forms.iter().any(|form| {
-                if is_japanese(language) {
-                    sentence.contains(form)
-                } else {
-                    sentence_lower.contains(&form.to_lowercase())
+        let tokens = tokenize_text(sentence, language)?;
+        let mut seen: HashSet<String> = HashSet::new();
+        for token in &tokens {
+            if token.is_content {
+                let norm = normalize_lemma(&token.lemma, language);
+                if seen.insert(norm.clone()) {
+                    lemma_sentences.entry(norm).or_default().push(sentence.clone());
                 }
-            });
-
-            if found && seen_lemmas.insert(lemma.clone()) {
-                lemma_sentences
-                    .entry(lemma.clone())
-                    .or_default()
-                    .push(sentence.clone());
             }
         }
-
-        sentence_content_lemmas.insert(sentence.clone(), seen_lemmas);
+        sentence_content_lemmas.insert(sentence.clone(), seen);
     }
 
     // Limit sentences per word
@@ -248,7 +238,7 @@ fn build_word_list(
     lemma_sentences: &HashMap<String, Vec<String>>,
     language: &str,
 ) -> Vec<WordInfo> {
-    let freq_map = frequency::count_lemmas(all_tokens);
+    let freq_map = frequency::count_lemmas(all_tokens, language);
 
     let mut words: Vec<WordInfo> = freq_map
         .into_iter()
@@ -422,7 +412,7 @@ pub async fn create_deck_from_text(
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
 
-    let freq_map = frequency::count_lemmas(&all_tokens);
+    let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
     let mut words: Vec<(String, i32)> = freq_map
         .iter()
@@ -550,7 +540,7 @@ pub async fn create_deck_from_pdf(
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
 
-    let freq_map = frequency::count_lemmas(&all_tokens);
+    let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
     let mut words: Vec<(String, i32)> = freq_map
         .iter()
@@ -708,7 +698,7 @@ pub async fn create_deck_from_media(
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&transcript, &language)?;
 
-    let freq_map = frequency::count_lemmas(&all_tokens);
+    let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
     let mut words: Vec<(String, i32)> = freq_map
         .iter()
@@ -791,19 +781,8 @@ async fn create_cards_from_analysis(
     sentence_content_lemmas: &HashMap<String, HashSet<String>>,
     language: &str,
 ) -> AppResult<CardCreationResult> {
-    // Query existing lemmas the user already has cards for (across ALL decks, not filtered by language)
-    let existing_lemmas: HashSet<String> = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT c.lemma FROM cards c
-        JOIN decks d ON c.deck_id = d.id
-        WHERE d.user_id = $1
-        "#,
-    )
-    .bind(auth_user.user_id)
-    .fetch_all(&state.db)
-    .await?
-    .into_iter()
-    .collect();
+    // Query existing known lemmas for this user+language (language-scoped dedup)
+    let existing_lemmas = known_words_service::get_known_lemmas(&state.db, auth_user.user_id, language).await?;
 
     let want_word_def = deck_types.contains(&DeckType::WordDefinition);
     let want_i_plus_one = deck_types.contains(&DeckType::IPlusOne);
@@ -932,6 +911,10 @@ async fn create_cards_from_analysis(
 
     let cards_created = card_ids.len();
 
+    // Add newly created lemmas to known_words
+    let new_lemmas: Vec<&str> = card_data_list.iter().map(|c| c.lemma.as_str()).collect();
+    known_words_service::add_known_words(&state.db, auth_user.user_id, language, &new_lemmas).await?;
+
     // Batch INSERT all card_states
     sqlx::query(
         r#"
@@ -963,22 +946,39 @@ async fn create_cards_from_analysis(
             None => continue,
         };
 
+        // Track which sentences have been attached (to avoid duplicates when both types selected)
+        let mut attached_sentences: HashSet<String> = HashSet::new();
+
+        // Attach i+1 sentences if requested
         if want_i_plus_one {
             if let Some(i1_sentences) = i_plus_one_map.get(&data.lemma) {
                 for (i, (sentence, cloze_text, cloze_answer)) in i1_sentences.iter().enumerate() {
+                    attached_sentences.insert(sentence.clone());
                     sent_card_ids.push(card_id);
                     sent_texts.push(sentence.clone());
                     sent_cloze_texts.push(cloze_text.clone());
                     sent_cloze_answers.push(cloze_answer.clone());
-                    sent_is_primary.push(i == 0);
+                    // When both types selected, word_def sentence is primary (for flashcard mode)
+                    sent_is_primary.push(!want_word_def && i == 0);
                 }
             }
-        } else if want_word_def {
+        }
+
+        // Attach word_def sentences if requested (deduped against i+1 sentences)
+        if want_word_def {
             let word_sentences = lemma_sentences.get(&data.lemma);
             let word_surfaces = surface_forms.get(&data.lemma);
 
             if let Some(sents) = word_sentences {
-                for (i, sentence) in sents.iter().take(3).enumerate() {
+                let mut word_def_count = 0;
+                for sentence in sents.iter() {
+                    if word_def_count >= 3 {
+                        break;
+                    }
+                    if attached_sentences.contains(sentence) {
+                        continue;
+                    }
+
                     let mut cloze_text = sentence.clone();
                     let mut cloze_answer = data.lemma.clone();
 
@@ -996,7 +996,8 @@ async fn create_cards_from_analysis(
                     sent_texts.push(sentence.clone());
                     sent_cloze_texts.push(cloze_text);
                     sent_cloze_answers.push(cloze_answer);
-                    sent_is_primary.push(i == 0);
+                    sent_is_primary.push(word_def_count == 0);
+                    word_def_count += 1;
                 }
             }
         }

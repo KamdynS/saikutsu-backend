@@ -9,7 +9,9 @@ use crate::processing::{
     pdf::extract_text_from_bytes,
     tokenizers::{JapaneseTokenizer, EuropeanTokenizer, Token},
     frequency::count_lemmas,
+    normalization::normalize_lemma,
 };
+use crate::services::known_words_service;
 
 // Processed data stored temporarily in memory (in production, use Redis)
 use std::sync::Mutex;
@@ -98,7 +100,7 @@ pub async fn process_pdf(
     update_upload_status(pool, upload_id, "analyzing", 50).await?;
 
     // Count lemma frequencies
-    let word_counts = count_lemmas(&tokens);
+    let word_counts = count_lemmas(&tokens, language);
     let unique_words = word_counts.len() as i32;
 
     sqlx::query("UPDATE uploads SET unique_words = $1 WHERE id = $2")
@@ -126,19 +128,24 @@ pub async fn process_pdf(
     // Sort by document frequency (most common first)
     processed_words.sort_by(|a, b| b.doc_count.cmp(&a.doc_count));
 
-    // Extract sentences for each word
+    // Extract sentences for each word using per-sentence tokenization (avoids substring false positives)
     let mut sentences: HashMap<String, Vec<ExtractedSentence>> = HashMap::new();
     for page in &pages {
         for sentence in extract_sentences(&page.text) {
-            for word in &processed_words {
-                if sentence.contains(&word.lemma) {
-                    sentences
-                        .entry(word.lemma.clone())
-                        .or_default()
-                        .push(ExtractedSentence {
-                            text: sentence.clone(),
-                            page: page.page_num as i32,
-                        });
+            let sent_tokens = tokenize_text(&sentence, language)?;
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for token in &sent_tokens {
+                if token.is_content {
+                    let norm = normalize_lemma(&token.lemma, language);
+                    if seen.insert(norm.clone()) {
+                        sentences
+                            .entry(norm)
+                            .or_default()
+                            .push(ExtractedSentence {
+                                text: sentence.clone(),
+                                page: page.page_num as i32,
+                            });
+                    }
                 }
             }
         }
@@ -299,6 +306,13 @@ pub async fn finalize_upload(
             }
         }
     }
+
+    // Add created lemmas to known_words
+    let normalized_lemmas: Vec<String> = words_to_add.iter()
+        .map(|w| normalize_lemma(&w.lemma, &upload.language))
+        .collect();
+    let lemma_refs: Vec<&str> = normalized_lemmas.iter().map(|s| s.as_str()).collect();
+    known_words_service::add_known_words(pool, user_id, &upload.language, &lemma_refs).await?;
 
     // Update upload with deck_id
     sqlx::query("UPDATE uploads SET deck_id = $1 WHERE id = $2")

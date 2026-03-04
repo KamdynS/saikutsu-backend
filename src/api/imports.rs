@@ -12,6 +12,8 @@ use crate::{
     api::middleware::AuthUser,
     error::{AppError, AppResult},
     models::{Deck, DeckResponse},
+    processing::normalization::normalize_lemma,
+    services::known_words_service,
     AppState,
 };
 
@@ -95,6 +97,13 @@ pub async fn import_apkg(
     .await?;
 
     let cards_created = card_ids.len();
+
+    // Add imported lemmas to known_words
+    let normalized_lemmas: Vec<String> = notes.iter()
+        .map(|n| normalize_lemma(&n.front, &language))
+        .collect();
+    let lemma_refs: Vec<&str> = normalized_lemmas.iter().map(|s| s.as_str()).collect();
+    known_words_service::add_known_words(&state.db, auth_user.user_id, &language, &lemma_refs).await?;
 
     // Batch insert all card_states
     sqlx::query(
