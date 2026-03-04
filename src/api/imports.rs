@@ -50,6 +50,9 @@ pub async fn import_apkg(
         ));
     }
 
+    // Auto-detect if fields are swapped (English front, CJK back) and fix
+    let notes = maybe_swap_fields(notes);
+
     // Auto-detect language from card content
     let sample_text: String = notes.iter()
         .take(20)
@@ -241,4 +244,48 @@ fn extract_deck_name(conn: &Connection) -> anyhow::Result<String> {
     }
 
     Ok("Anki Import".to_string())
+}
+
+/// Count CJK and Latin characters in a string.
+fn count_script_chars(text: &str) -> (usize, usize) {
+    let mut cjk = 0;
+    let mut latin = 0;
+    for c in text.chars() {
+        if analyze::is_cjk(c) {
+            cjk += 1;
+        } else if c.is_alphabetic() {
+            latin += 1;
+        }
+    }
+    (cjk, latin)
+}
+
+/// If front fields are predominantly Latin and back fields are predominantly CJK,
+/// swap them so the CJK word is always the lemma (front) and English is the definition (back).
+fn maybe_swap_fields(mut notes: Vec<AnkiNote>) -> Vec<AnkiNote> {
+    let sample_size = notes.len().min(30);
+    let mut front_cjk = 0usize;
+    let mut front_latin = 0usize;
+    let mut back_cjk = 0usize;
+    let mut back_latin = 0usize;
+
+    for note in notes.iter().take(sample_size) {
+        let (fc, fl) = count_script_chars(&note.front);
+        let (bc, bl) = count_script_chars(&note.back);
+        front_cjk += fc;
+        front_latin += fl;
+        back_cjk += bc;
+        back_latin += bl;
+    }
+
+    // Swap if fronts are mostly Latin and backs are mostly CJK
+    let should_swap = front_latin > front_cjk && back_cjk > back_latin && back_cjk > 5;
+
+    if should_swap {
+        for note in &mut notes {
+            std::mem::swap(&mut note.front, &mut note.back);
+        }
+    }
+
+    notes
 }

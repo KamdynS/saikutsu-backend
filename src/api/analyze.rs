@@ -93,7 +93,7 @@ pub fn detect_language(text: &str, hint: Option<&str>) -> String {
     }
 }
 
-fn is_cjk(c: char) -> bool {
+pub(crate) fn is_cjk(c: char) -> bool {
     matches!(c,
         '\u{3040}'..='\u{309F}' | // Hiragana
         '\u{30A0}'..='\u{30FF}' | // Katakana
