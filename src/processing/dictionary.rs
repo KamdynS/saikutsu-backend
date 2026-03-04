@@ -8,55 +8,103 @@ pub struct DictEntry {
     pub definitions: Vec<String>,
 }
 
-static DICTIONARY: OnceLock<HashMap<String, DictEntry>> = OnceLock::new();
+/// Language code → (word → entry)
+static DICTIONARIES: OnceLock<HashMap<String, HashMap<String, DictEntry>>> = OnceLock::new();
 
-/// Load the JMdict lookup dictionary (call once at startup)
-pub fn load_dictionary() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if DICTIONARY.get().is_some() {
+/// Load all dictionaries: JMdict for Japanese + Wiktionary for European languages.
+/// Call once at startup.
+pub fn load_dictionaries() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if DICTIONARIES.get().is_some() {
         return Ok(());
     }
 
-    // Try multiple paths for the dictionary file
+    let mut all_dicts: HashMap<String, HashMap<String, DictEntry>> = HashMap::new();
+
+    // Load JMdict for Japanese
+    match load_dict_file("jmdict-lookup.json") {
+        Ok(dict) => {
+            tracing::info!("Loaded {} Japanese (JMdict) dictionary entries", dict.len());
+            all_dicts.insert("ja".to_string(), dict);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load JMdict: {}. Japanese definitions will be unavailable.", e);
+        }
+    }
+
+    // Load Wiktionary dictionaries for European languages
+    let european_langs = ["es", "fr", "de", "it", "pt"];
+    for lang in european_langs {
+        let filename = format!("wiktionary-{}-lookup.json", lang);
+        match load_dict_file(&filename) {
+            Ok(dict) => {
+                tracing::info!("Loaded {} {} (Wiktionary) dictionary entries", dict.len(), lang);
+                all_dicts.insert(lang.to_string(), dict);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load {} dictionary: {}. {} definitions will be unavailable.", lang, e, lang);
+            }
+        }
+    }
+
+    DICTIONARIES
+        .set(all_dicts)
+        .map_err(|_| "Dictionaries already initialized")?;
+
+    Ok(())
+}
+
+/// Load a single dictionary JSON file, trying multiple paths.
+fn load_dict_file(filename: &str) -> Result<HashMap<String, DictEntry>, Box<dyn std::error::Error + Send + Sync>> {
     let paths = [
-        "data/dictionaries/jmdict-lookup.json",
-        "/app/data/dictionaries/jmdict-lookup.json", // Docker path
+        format!("data/dictionaries/{}", filename),
+        format!("/app/data/dictionaries/{}", filename), // Docker path
     ];
 
     let mut dict_data = None;
-    for path in paths {
+    for path in &paths {
         if let Ok(data) = std::fs::read_to_string(path) {
-            tracing::info!("Loading JMdict from {}", path);
+            tracing::info!("Loading dictionary from {}", path);
             dict_data = Some(data);
             break;
         }
     }
 
-    let data = dict_data.ok_or("JMdict lookup file not found")?;
+    let data = dict_data.ok_or_else(|| format!("{} not found", filename))?;
     let dict: HashMap<String, DictEntry> = serde_json::from_str(&data)?;
-
-    tracing::info!("Loaded {} dictionary entries", dict.len());
-
-    DICTIONARY
-        .set(dict)
-        .map_err(|_| "Dictionary already initialized")?;
-
-    Ok(())
+    Ok(dict)
 }
 
-/// Look up a word in the dictionary
-pub fn lookup(word: &str) -> Option<DictEntry> {
-    DICTIONARY.get()?.get(word).cloned()
+/// Look up a word in the dictionary for a specific language.
+pub fn lookup(word: &str, language: &str) -> Option<DictEntry> {
+    DICTIONARIES.get()?.get(language)?.get(word).cloned()
 }
 
-/// Look up multiple words and return a map
-pub fn lookup_many(words: &[String]) -> HashMap<String, DictEntry> {
-    let dict = match DICTIONARY.get() {
+/// Look up multiple words and return a map, for a specific language.
+pub fn lookup_many(words: &[String], language: &str) -> HashMap<String, DictEntry> {
+    let lang_dict = match DICTIONARIES.get().and_then(|d| d.get(language)) {
         Some(d) => d,
         None => return HashMap::new(),
     };
 
     words
         .iter()
-        .filter_map(|w| dict.get(w).map(|e| (w.clone(), e.clone())))
+        .filter_map(|w| lang_dict.get(w).map(|e| (w.clone(), e.clone())))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lookup_missing_language_returns_none() {
+        // Before initialization, lookups should return None gracefully
+        assert!(lookup("hello", "xx").is_none());
+    }
+
+    #[test]
+    fn test_lookup_many_empty() {
+        let result = lookup_many(&[], "ja");
+        assert!(result.is_empty());
+    }
 }

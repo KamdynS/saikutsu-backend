@@ -241,20 +241,17 @@ fn build_word_list(
     let mut words: Vec<WordInfo> = freq_map
         .into_iter()
         .map(|(lemma, wf)| {
-            // Only use JMdict for Japanese
-            let (definitions, reading) = if is_japanese(language) {
-                let dict_entry = dictionary::lookup(&lemma);
-                let defs = dict_entry
-                    .as_ref()
-                    .map(|e| e.definitions.clone())
-                    .unwrap_or_default();
-                let rdg = dict_entry
+            let dict_entry = dictionary::lookup(&lemma, language);
+            let definitions = dict_entry
+                .as_ref()
+                .map(|e| e.definitions.clone())
+                .unwrap_or_default();
+            let reading = if is_japanese(language) {
+                dict_entry
                     .map(|e| Some(e.reading))
-                    .unwrap_or(wf.reading);
-                (defs, rdg)
+                    .unwrap_or(wf.reading)
             } else {
-                // European languages: no dictionary lookup, use the lemma itself
-                (vec![], None)
+                None
             };
 
             WordInfo {
@@ -856,21 +853,17 @@ async fn create_cards_from_analysis(
             continue;
         }
 
-        // For Japanese, look up definitions from JMdict
-        let (definitions, reading, pos) = if is_japanese(language) {
-            let dict_entry = dictionary::lookup(lemma);
-            let defs = dict_entry
-                .as_ref()
-                .map(|e| e.definitions.join("; "))
-                .unwrap_or_default();
-            let rdg = dict_entry.as_ref().map(|e| e.reading.clone());
-            let p = pos_map.get(lemma).cloned();
-            (defs, rdg, p)
+        let dict_entry = dictionary::lookup(lemma, language);
+        let definitions = dict_entry
+            .as_ref()
+            .map(|e| e.definitions.join("; "))
+            .unwrap_or_default();
+        let reading = if is_japanese(language) {
+            dict_entry.as_ref().map(|e| e.reading.clone())
         } else {
-            // European: use lemma as-is, no dictionary
-            let p = pos_map.get(lemma).cloned();
-            (lemma.clone(), None, p)
+            None
         };
+        let pos = pos_map.get(lemma).cloned();
 
         // For Japanese, skip words without definitions
         if is_japanese(language) && definitions.is_empty() {

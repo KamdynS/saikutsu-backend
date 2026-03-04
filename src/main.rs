@@ -30,9 +30,9 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Database ready");
 
-    // Load JMdict dictionary (Japanese)
-    if let Err(e) = dictionary::load_dictionary() {
-        tracing::warn!("Failed to load JMdict: {}. Japanese definitions will be unavailable.", e);
+    // Load all dictionaries (JMdict for Japanese + Wiktionary for European languages)
+    if let Err(e) = dictionary::load_dictionaries() {
+        tracing::warn!("Failed to load dictionaries: {}", e);
     }
 
     // Load lemmatization dictionaries (European languages)
