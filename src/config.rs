@@ -5,6 +5,7 @@ pub struct Config {
     pub database_url: String,
     pub port: u16,
     pub supabase_jwt_secret: String,
+    pub supabase_url: Option<String>,
     pub allowed_origins: Vec<String>,
     pub openai_api_key: Option<String>,
 }
@@ -22,6 +23,7 @@ impl Config {
                 .unwrap_or(8080),
             supabase_jwt_secret: env::var("SUPABASE_JWT_SECRET")
                 .unwrap_or_default(),
+            supabase_url: env::var("SUPABASE_URL").ok().filter(|s| !s.is_empty()),
             allowed_origins: env::var("ALLOWED_ORIGINS")
                 .unwrap_or_default()
                 .split(',')
