@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         // Export
         .route("/v1/decks/{id}/export", post(api::exports::export_apkg))
         // Analysis (endpoints that create decks need auth)
+        .route("/v1/decks/from-anki", post(api::imports::import_apkg))
         .route("/v1/decks/from-pdf", post(api::analyze::create_deck_from_pdf))
         .route("/v1/decks/from-text", post(api::analyze::create_deck_from_text))
         .route("/v1/decks/from-media", post(api::analyze::create_deck_from_media))

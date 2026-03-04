@@ -3,5 +3,6 @@ pub mod auth;
 pub mod cards;
 pub mod decks;
 pub mod exports;
+pub mod imports;
 pub mod middleware;
 pub mod reviews;
