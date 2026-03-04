@@ -35,6 +35,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 jsonwebtoken = "9"
+supabase-jwt = "0.1"
 dotenvy = "0.15"
 regex = "1"
 once_cell = "1.20"

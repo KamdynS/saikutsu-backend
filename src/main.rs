@@ -40,9 +40,16 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("Failed to load lemma dictionaries: {}. European lemmatization will fall back to lowercase forms.", e);
     }
 
+    let jwks_cache = config.supabase_url.as_ref().map(|url| {
+        let jwks_url = format!("{}/auth/v1/.well-known/jwks.json", url.trim_end_matches('/'));
+        tracing::info!("Initializing JWKS cache from {}", jwks_url);
+        supabase_jwt::JwksCache::new(&jwks_url)
+    });
+
     let state = Arc::new(AppState {
         db: pool,
         config: config.clone(),
+        jwks_cache,
     });
 
     // Build CORS layer

@@ -16,6 +16,7 @@ use std::sync::Arc;
 pub struct AppState {
     pub db: sqlx::PgPool,
     pub config: Config,
+    pub jwks_cache: Option<supabase_jwt::JwksCache>,
 }
 
 pub type SharedAppState = Arc<AppState>;
