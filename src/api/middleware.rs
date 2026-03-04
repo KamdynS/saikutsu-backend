@@ -44,21 +44,22 @@ struct JwkKey {
     kid: Option<String>,
 }
 
-/// Cached JWKS decoding keys
 static JWKS_KEYS: OnceCell<Vec<(Option<String>, DecodingKey)>> = OnceCell::const_new();
 
 async fn get_jwks_keys(supabase_url: &str) -> Result<&'static Vec<(Option<String>, DecodingKey)>, AppError> {
     JWKS_KEYS
         .get_or_try_init(|| async {
-            let jwks_url = format!("{}/.well-known/jwks.json", supabase_url.trim_end_matches('/'));
+            // Supabase JWKS endpoint is under /auth/v1/
+            let jwks_url = format!(
+                "{}/auth/v1/.well-known/jwks.json",
+                supabase_url.trim_end_matches('/')
+            );
             tracing::info!("Fetching JWKS from {}", jwks_url);
 
-            let response = reqwest::get(&jwks_url)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to fetch JWKS: {}", e);
-                    AppError::Internal(anyhow::anyhow!("Failed to fetch JWKS: {}", e))
-                })?;
+            let response = reqwest::get(&jwks_url).await.map_err(|e| {
+                tracing::error!("Failed to fetch JWKS: {}", e);
+                AppError::Internal(anyhow::anyhow!("Failed to fetch JWKS: {}", e))
+            })?;
 
             let jwks: JwksResponse = response.json().await.map_err(|e| {
                 tracing::error!("Failed to parse JWKS: {}", e);
@@ -75,7 +76,7 @@ async fn get_jwks_keys(supabase_url: &str) -> Result<&'static Vec<(Option<String
                                 keys.push((key.kid.clone(), dk));
                             }
                             Err(e) => {
-                                tracing::warn!("Failed to load EC key kid={:?}: {}", key.kid, e);
+                                tracing::warn!("Failed to load EC key: {}", e);
                             }
                         }
                     }
@@ -83,7 +84,7 @@ async fn get_jwks_keys(supabase_url: &str) -> Result<&'static Vec<(Option<String
             }
 
             if keys.is_empty() {
-                tracing::warn!("No EC keys found in JWKS");
+                tracing::warn!("No usable keys found in JWKS response");
             }
 
             Ok(keys)
@@ -106,7 +107,6 @@ pub async fn auth_middleware(
         .strip_prefix("Bearer ")
         .ok_or(AppError::Unauthorized)?;
 
-    // Peek at the token header to determine algorithm
     let header = decode_header(token).map_err(|e| {
         tracing::debug!("JWT header decode failed: {}", e);
         AppError::Unauthorized
@@ -114,7 +114,6 @@ pub async fn auth_middleware(
 
     let claims = match header.alg {
         Algorithm::ES256 => {
-            // Use JWKS public key
             let supabase_url = state.config.supabase_url.as_deref().ok_or_else(|| {
                 tracing::error!("SUPABASE_URL is required for ES256 JWT validation");
                 AppError::Unauthorized
@@ -129,13 +128,13 @@ pub async fn auth_middleware(
             let mut validation = Validation::new(Algorithm::ES256);
             validation.set_audience(&["authenticated"]);
 
-            // Try matching by kid first, then try all keys
+            // Match by kid if present, otherwise use first key
             let kid = header.kid.as_deref();
-            let matching_key = kid
+            let key = kid
                 .and_then(|kid| keys.iter().find(|(k, _)| k.as_deref() == Some(kid)))
-                .map(|(_, dk)| dk);
-
-            let key = matching_key.unwrap_or_else(|| &keys[0].1);
+                .or_else(|| keys.first())
+                .map(|(_, dk)| dk)
+                .unwrap();
 
             decode::<Claims>(token, key, &validation)
                 .map_err(|e| {
@@ -145,7 +144,7 @@ pub async fn auth_middleware(
                 .claims
         }
         _ => {
-            // Fall back to HS256 with shared secret
+            // HS256 fallback with shared secret
             let secret = &state.config.supabase_jwt_secret;
             if secret.is_empty() {
                 tracing::error!("SUPABASE_JWT_SECRET is not configured");
@@ -155,16 +154,19 @@ pub async fn auth_middleware(
             let mut validation = Validation::new(Algorithm::HS256);
             validation.set_audience(&["authenticated"]);
 
-            decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &validation)
-                .map_err(|e| {
-                    tracing::debug!("HS256 JWT validation failed: {}", e);
-                    AppError::Unauthorized
-                })?
-                .claims
+            decode::<Claims>(
+                token,
+                &DecodingKey::from_secret(secret.as_bytes()),
+                &validation,
+            )
+            .map_err(|e| {
+                tracing::debug!("HS256 JWT validation failed: {}", e);
+                AppError::Unauthorized
+            })?
+            .claims
         }
     };
 
-    // Verify role is "authenticated"
     if claims.role.as_deref() != Some("authenticated") {
         return Err(AppError::Forbidden);
     }
