@@ -15,8 +15,8 @@ use std::sync::Arc;
 pub struct AppState {
     pub db: sqlx::PgPool,
     pub config: Config,
-    /// Cached JWKS decoding keys fetched at startup
-    pub jwks_keys: Vec<(Option<String>, jsonwebtoken::DecodingKey)>,
+    /// Cached JWKS decoding keys, lazily fetched on first auth request
+    pub jwks_keys: tokio::sync::OnceCell<Vec<(Option<String>, jsonwebtoken::DecodingKey)>>,
 }
 
 pub type SharedAppState = Arc<AppState>;

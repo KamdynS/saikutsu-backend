@@ -98,7 +98,21 @@ pub async fn auth_middleware(
 
     let claims = match header.alg {
         Algorithm::ES256 => {
-            if state.jwks_keys.is_empty() {
+            let supabase_url = state.config.supabase_url.as_deref().ok_or_else(|| {
+                tracing::error!("SUPABASE_URL is required for ES256 JWT validation");
+                AppError::Unauthorized
+            })?;
+
+            let jwks_url = format!("{}/auth/v1/.well-known/jwks.json", supabase_url.trim_end_matches('/'));
+            let keys = state.jwks_keys.get_or_try_init(|| async {
+                tracing::info!("Fetching JWKS from {}", jwks_url);
+                fetch_jwks_keys(&jwks_url).await
+            }).await.map_err(|e| {
+                tracing::error!("Failed to fetch JWKS: {}", e);
+                AppError::Unauthorized
+            })?;
+
+            if keys.is_empty() {
                 tracing::error!("No JWKS keys available for ES256 validation");
                 return Err(AppError::Unauthorized);
             }
@@ -109,12 +123,10 @@ pub async fn auth_middleware(
             let kid = header.kid.as_deref();
             let key = kid
                 .and_then(|kid| {
-                    state
-                        .jwks_keys
-                        .iter()
+                    keys.iter()
                         .find(|(k, _)| k.as_deref() == Some(kid))
                 })
-                .or_else(|| state.jwks_keys.first())
+                .or_else(|| keys.first())
                 .map(|(_, dk)| dk)
                 .ok_or(AppError::Unauthorized)?;
 
