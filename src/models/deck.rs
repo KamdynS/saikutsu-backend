@@ -24,7 +24,6 @@ pub struct Deck {
 pub struct CreateDeckRequest {
     pub name: String,
     pub description: Option<String>,
-    pub language: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::{
     api::middleware::AuthUser,
     error::{AppError, AppResult},
-    models::{Card, Deck, DeckResponse, Sentence},
+    models::{Deck, DeckResponse},
     processing::{dictionary, frequency, pdf, transcription, tokenizers::{EuropeanTokenizer, JapaneseTokenizer, Token}},
     AppState,
 };
@@ -66,7 +66,7 @@ pub struct WordInfo {
 
 /// Detect language from text content. If CJK characters dominate, it's Japanese.
 /// Otherwise fall back to the provided hint or default to "ja".
-fn detect_language(text: &str, hint: Option<&str>) -> String {
+pub fn detect_language(text: &str, hint: Option<&str>) -> String {
     if let Some(h) = hint {
         let valid = ["ja", "es", "fr", "de", "it", "pt"];
         if valid.contains(&h) {
@@ -106,12 +106,11 @@ fn is_japanese(lang: &str) -> bool {
     lang == "ja"
 }
 
-/// Tokenize text using the appropriate tokenizer for the language
+/// Tokenize text using the appropriate tokenizer for the language.
+/// Uses cached JapaneseTokenizer to avoid expensive re-initialization.
 fn tokenize_text(text: &str, language: &str) -> Result<Vec<Token>, AppError> {
     if is_japanese(language) {
-        let tokenizer = JapaneseTokenizer::new()
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Tokenizer init failed: {}", e)))?;
-        Ok(tokenizer.tokenize(text))
+        Ok(JapaneseTokenizer::global().tokenize(text))
     } else {
         let tokenizer = EuropeanTokenizer::new(language)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Tokenizer init failed: {}", e)))?;
@@ -166,13 +165,16 @@ fn split_sentences_european(text: &str) -> Vec<String> {
 }
 
 /// Core analysis logic shared by PDF and text analysis.
-/// Returns: (tokens, sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas)
+/// Tokenizes text only ONCE and maps tokens to sentences by substring matching,
+/// avoiding expensive per-sentence re-tokenization.
+#[allow(clippy::type_complexity)]
 fn analyze_text_core(
     full_text: &str,
     language: &str,
 ) -> Result<(Vec<Token>, Vec<String>, HashMap<String, Vec<String>>, HashMap<String, String>, HashMap<String, Vec<String>>, HashMap<String, HashSet<String>>), AppError> {
     let sentences = split_sentences(full_text, language);
 
+    // Tokenize full text only ONCE (was previously tokenized again per-sentence)
     let all_tokens = tokenize_text(full_text, language)?;
 
     // Build surface form and POS mappings
@@ -194,19 +196,29 @@ fn analyze_text_core(
         forms.dedup();
     }
 
-    // Build lemma → sentences mapping AND sentence → content lemmas mapping
+    // Build lemma → sentences and sentence → content lemmas mappings
+    // by checking which surface forms appear in each sentence (no re-tokenization)
     let mut lemma_sentences: HashMap<String, Vec<String>> = HashMap::new();
     let mut sentence_content_lemmas: HashMap<String, HashSet<String>> = HashMap::new();
 
+    // Build set of content lemmas and their surface forms for matching
     for sentence in &sentences {
-        let sentence_tokens = tokenize_text(sentence, language)?;
         let mut seen_lemmas: HashSet<String> = HashSet::new();
+        let sentence_lower = sentence.to_lowercase();
 
-        for token in sentence_tokens {
-            if token.is_content && !seen_lemmas.contains(&token.lemma) {
-                seen_lemmas.insert(token.lemma.clone());
+        for (lemma, forms) in &surface_forms {
+            // Check if any surface form of this lemma appears in the sentence
+            let found = forms.iter().any(|form| {
+                if is_japanese(language) {
+                    sentence.contains(form)
+                } else {
+                    sentence_lower.contains(&form.to_lowercase())
+                }
+            });
+
+            if found && seen_lemmas.insert(lemma.clone()) {
                 lemma_sentences
-                    .entry(token.lemma)
+                    .entry(lemma.clone())
                     .or_default()
                     .push(sentence.clone());
             }
@@ -243,12 +255,11 @@ fn build_word_list(
         .map(|(lemma, wf)| {
             let dict_entry = dictionary::lookup(&lemma, language);
             let definitions = dict_entry
-                .as_ref()
                 .map(|e| e.definitions.clone())
                 .unwrap_or_default();
             let reading = if is_japanese(language) {
                 dict_entry
-                    .map(|e| Some(e.reading))
+                    .map(|e| Some(e.reading.clone()))
                     .unwrap_or(wf.reading)
             } else {
                 None
@@ -765,7 +776,9 @@ struct CardCreationResult {
     words_skipped_duplicate: usize,
 }
 
-/// Shared logic for creating cards from analyzed text
+/// Shared logic for creating cards from analyzed text.
+/// Uses batch INSERTs instead of individual queries per card.
+#[allow(clippy::too_many_arguments)]
 async fn create_cards_from_analysis(
     state: &Arc<AppState>,
     auth_user: &AuthUser,
@@ -778,16 +791,15 @@ async fn create_cards_from_analysis(
     sentence_content_lemmas: &HashMap<String, HashSet<String>>,
     language: &str,
 ) -> AppResult<CardCreationResult> {
-    // Query existing lemmas the user already has cards for in this language
+    // Query existing lemmas the user already has cards for (across ALL decks, not filtered by language)
     let existing_lemmas: HashSet<String> = sqlx::query_scalar::<_, String>(
         r#"
         SELECT DISTINCT c.lemma FROM cards c
         JOIN decks d ON c.deck_id = d.id
-        WHERE d.user_id = $1 AND d.language = $2
+        WHERE d.user_id = $1
         "#,
     )
     .bind(auth_user.user_id)
-    .bind(language)
     .fetch_all(&state.db)
     .await?
     .into_iter()
@@ -801,14 +813,12 @@ async fn create_cards_from_analysis(
     let mut i_plus_one_found: usize = 0;
 
     if want_i_plus_one {
-        // Collect all lemmas from the new word list (not yet in existing_lemmas)
         let new_lemmas: HashSet<&str> = words.iter()
             .map(|(lemma, _)| lemma.as_str())
             .filter(|l| !existing_lemmas.contains(*l))
             .collect();
 
         for (sentence, content_lemmas) in sentence_content_lemmas {
-            // Count how many content lemmas in this sentence are unknown
             let unknown_lemmas: Vec<&String> = content_lemmas.iter()
                 .filter(|l| !existing_lemmas.contains(l.as_str()) && new_lemmas.contains(l.as_str()))
                 .collect();
@@ -816,16 +826,18 @@ async fn create_cards_from_analysis(
             if unknown_lemmas.len() == 1 {
                 i_plus_one_found += 1;
                 let unknown_lemma = unknown_lemmas[0].clone();
-                let word_surfaces = surface_forms.get(&unknown_lemma).cloned().unwrap_or_default();
+                let word_surfaces = surface_forms.get(&unknown_lemma);
 
                 let mut cloze_text = sentence.clone();
                 let mut cloze_answer = unknown_lemma.clone();
 
-                for surface in &word_surfaces {
-                    if sentence.contains(surface) {
-                        cloze_text = sentence.replace(surface, "＿＿＿");
-                        cloze_answer = surface.clone();
-                        break;
+                if let Some(surfaces) = word_surfaces {
+                    for surface in surfaces {
+                        if sentence.contains(surface) {
+                            cloze_text = sentence.replace(surface, "＿＿＿");
+                            cloze_answer = surface.clone();
+                            break;
+                        }
                     }
                 }
 
@@ -837,122 +849,176 @@ async fn create_cards_from_analysis(
         }
     }
 
-    let mut cards_created = 0;
-    let mut sentences_created = 0;
+    // Pre-compute all card data before batch insert
+    struct CardData {
+        lemma: String,
+        reading: Option<String>,
+        definition: String,
+        pos: Option<String>,
+        frequency_rank: i32,
+        doc_frequency: i32,
+    }
+
+    let mut card_data_list: Vec<CardData> = Vec::new();
     let mut words_skipped_duplicate = 0;
 
     for (rank, (lemma, count)) in words.iter().enumerate() {
-        // Skip words the user already has
         if existing_lemmas.contains(lemma) {
             words_skipped_duplicate += 1;
             continue;
         }
 
-        // In i+1-only mode, skip words that don't appear in any i+1 sentence
         if want_i_plus_one && !want_word_def && !i_plus_one_map.contains_key(lemma) {
             continue;
         }
 
         let dict_entry = dictionary::lookup(lemma, language);
         let definitions = dict_entry
-            .as_ref()
             .map(|e| e.definitions.join("; "))
             .unwrap_or_default();
         let reading = if is_japanese(language) {
-            dict_entry.as_ref().map(|e| e.reading.clone())
+            dict_entry.map(|e| e.reading.clone())
         } else {
             None
         };
-        let pos = pos_map.get(lemma).cloned();
 
-        // For Japanese, skip words without definitions
         if is_japanese(language) && definitions.is_empty() {
             continue;
         }
 
-        let card = sqlx::query_as::<_, Card>(
-            r#"
-            INSERT INTO cards (deck_id, lemma, reading, definition, part_of_speech, frequency_rank, doc_frequency)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING *
-            "#,
-        )
-        .bind(deck.id)
-        .bind(lemma)
-        .bind(&reading)
-        .bind(&definitions)
-        .bind(&pos)
-        .bind((rank + 1) as i32)
-        .bind(count)
-        .fetch_one(&state.db)
-        .await?;
+        card_data_list.push(CardData {
+            lemma: lemma.clone(),
+            reading,
+            definition: definitions,
+            pos: pos_map.get(lemma).cloned(),
+            frequency_rank: (rank + 1) as i32,
+            doc_frequency: *count,
+        });
+    }
 
-        cards_created += 1;
+    if card_data_list.is_empty() {
+        return Ok(CardCreationResult {
+            cards_created: 0,
+            sentences_created: 0,
+            i_plus_one_found,
+            words_skipped_duplicate,
+        });
+    }
 
-        sqlx::query("INSERT INTO card_states (user_id, card_id, status) VALUES ($1, $2, 'new')")
-            .bind(auth_user.user_id)
-            .bind(card.id)
-            .execute(&state.db)
-            .await?;
+    // Batch INSERT all cards using unnest
+    let lemmas: Vec<&str> = card_data_list.iter().map(|c| c.lemma.as_str()).collect();
+    let readings: Vec<Option<&str>> = card_data_list.iter().map(|c| c.reading.as_deref()).collect();
+    let definitions: Vec<&str> = card_data_list.iter().map(|c| c.definition.as_str()).collect();
+    let pos_list: Vec<Option<&str>> = card_data_list.iter().map(|c| c.pos.as_deref()).collect();
+    let freq_ranks: Vec<i32> = card_data_list.iter().map(|c| c.frequency_rank).collect();
+    let doc_freqs: Vec<i32> = card_data_list.iter().map(|c| c.doc_frequency).collect();
 
-        // Determine which sentences to attach
+    let card_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r#"
+        INSERT INTO cards (deck_id, lemma, reading, definition, part_of_speech, frequency_rank, doc_frequency)
+        SELECT $1, unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), unnest($5::text[]), unnest($6::int[]), unnest($7::int[])
+        RETURNING id
+        "#,
+    )
+    .bind(deck.id)
+    .bind(&lemmas)
+    .bind(&readings)
+    .bind(&definitions)
+    .bind(&pos_list)
+    .bind(&freq_ranks)
+    .bind(&doc_freqs)
+    .fetch_all(&state.db)
+    .await?;
+
+    let cards_created = card_ids.len();
+
+    // Batch INSERT all card_states
+    sqlx::query(
+        r#"
+        INSERT INTO card_states (user_id, card_id, status)
+        SELECT $1, unnest($2::uuid[]), 'new'
+        "#,
+    )
+    .bind(auth_user.user_id)
+    .bind(&card_ids)
+    .execute(&state.db)
+    .await?;
+
+    // Build lemma → card_id map for sentence attachment
+    let lemma_to_card_id: HashMap<&str, uuid::Uuid> = card_data_list.iter()
+        .zip(card_ids.iter())
+        .map(|(data, id)| (data.lemma.as_str(), *id))
+        .collect();
+
+    // Collect all sentences for batch insert
+    let mut sent_card_ids: Vec<uuid::Uuid> = Vec::new();
+    let mut sent_texts: Vec<String> = Vec::new();
+    let mut sent_cloze_texts: Vec<String> = Vec::new();
+    let mut sent_cloze_answers: Vec<String> = Vec::new();
+    let mut sent_is_primary: Vec<bool> = Vec::new();
+
+    for data in &card_data_list {
+        let card_id = match lemma_to_card_id.get(data.lemma.as_str()) {
+            Some(id) => *id,
+            None => continue,
+        };
+
         if want_i_plus_one {
-            // Use i+1 sentences if available
-            if let Some(i1_sentences) = i_plus_one_map.get(lemma) {
+            if let Some(i1_sentences) = i_plus_one_map.get(&data.lemma) {
                 for (i, (sentence, cloze_text, cloze_answer)) in i1_sentences.iter().enumerate() {
-                    sqlx::query_as::<_, Sentence>(
-                        r#"
-                        INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, is_primary)
-                        VALUES ($1, $2, $3, $4, $5)
-                        RETURNING *
-                        "#,
-                    )
-                    .bind(card.id)
-                    .bind(sentence)
-                    .bind(cloze_text)
-                    .bind(cloze_answer)
-                    .bind(i == 0)
-                    .fetch_one(&state.db)
-                    .await?;
-
-                    sentences_created += 1;
+                    sent_card_ids.push(card_id);
+                    sent_texts.push(sentence.clone());
+                    sent_cloze_texts.push(cloze_text.clone());
+                    sent_cloze_answers.push(cloze_answer.clone());
+                    sent_is_primary.push(i == 0);
                 }
             }
         } else if want_word_def {
-            // Word/Definition only — attach regular sentences with cloze
-            let word_sentences = lemma_sentences.get(lemma).cloned().unwrap_or_default();
-            let word_surfaces = surface_forms.get(lemma).cloned().unwrap_or_default();
+            let word_sentences = lemma_sentences.get(&data.lemma);
+            let word_surfaces = surface_forms.get(&data.lemma);
 
-            for (i, sentence) in word_sentences.iter().take(3).enumerate() {
-                let mut cloze_text = sentence.clone();
-                let mut cloze_answer = lemma.clone();
+            if let Some(sents) = word_sentences {
+                for (i, sentence) in sents.iter().take(3).enumerate() {
+                    let mut cloze_text = sentence.clone();
+                    let mut cloze_answer = data.lemma.clone();
 
-                for surface in &word_surfaces {
-                    if sentence.contains(surface) {
-                        cloze_text = sentence.replace(surface, "＿＿＿");
-                        cloze_answer = surface.clone();
-                        break;
+                    if let Some(surfaces) = word_surfaces {
+                        for surface in surfaces {
+                            if sentence.contains(surface) {
+                                cloze_text = sentence.replace(surface, "＿＿＿");
+                                cloze_answer = surface.clone();
+                                break;
+                            }
+                        }
                     }
+
+                    sent_card_ids.push(card_id);
+                    sent_texts.push(sentence.clone());
+                    sent_cloze_texts.push(cloze_text);
+                    sent_cloze_answers.push(cloze_answer);
+                    sent_is_primary.push(i == 0);
                 }
-
-                sqlx::query_as::<_, Sentence>(
-                    r#"
-                    INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, is_primary)
-                    VALUES ($1, $2, $3, $4, $5)
-                    RETURNING *
-                    "#,
-                )
-                .bind(card.id)
-                .bind(sentence)
-                .bind(&cloze_text)
-                .bind(&cloze_answer)
-                .bind(i == 0)
-                .fetch_one(&state.db)
-                .await?;
-
-                sentences_created += 1;
             }
         }
+    }
+
+    let sentences_created = sent_card_ids.len();
+
+    // Batch INSERT all sentences
+    if !sent_card_ids.is_empty() {
+        sqlx::query(
+            r#"
+            INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, is_primary)
+            SELECT unnest($1::uuid[]), unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), unnest($5::bool[])
+            "#,
+        )
+        .bind(&sent_card_ids)
+        .bind(&sent_texts)
+        .bind(&sent_cloze_texts)
+        .bind(&sent_cloze_answers)
+        .bind(&sent_is_primary)
+        .execute(&state.db)
+        .await?;
     }
 
     Ok(CardCreationResult {

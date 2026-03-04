@@ -3,6 +3,7 @@ use axum::{
     Extension, Json,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -43,55 +44,73 @@ pub async fn list(
     let per_page = query.per_page.unwrap_or(50).clamp(1, 100);
     let offset = (page - 1) * per_page;
 
-    // Get cards
-    let cards = sqlx::query_as::<_, Card>(
-        "SELECT * FROM cards WHERE deck_id = $1 ORDER BY frequency_rank ASC NULLS LAST, created_at ASC LIMIT $2 OFFSET $3",
-    )
-    .bind(deck_id)
-    .bind(per_page)
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await?;
-
-    // Get total count
-    let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM cards WHERE deck_id = $1")
+    // Get cards and total count concurrently
+    let (cards, total) = tokio::try_join!(
+        sqlx::query_as::<_, Card>(
+            "SELECT * FROM cards WHERE deck_id = $1 ORDER BY frequency_rank ASC NULLS LAST, created_at ASC LIMIT $2 OFFSET $3",
+        )
         .bind(deck_id)
-        .fetch_one(&state.db)
-        .await?;
+        .bind(per_page)
+        .bind(offset)
+        .fetch_all(&state.db),
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM cards WHERE deck_id = $1")
+            .bind(deck_id)
+            .fetch_one(&state.db),
+    )?;
 
-    // Get card states and sentences for each card
-    let mut card_responses = Vec::new();
-    for card in cards {
-        let state_result = sqlx::query_as::<_, CardState>(
-            "SELECT * FROM card_states WHERE card_id = $1 AND user_id = $2",
+    // Batch fetch card_states and sentences for all cards at once (avoids N+1)
+    let card_ids: Vec<Uuid> = cards.iter().map(|c| c.id).collect();
+
+    let (card_states, sentences) = tokio::try_join!(
+        sqlx::query_as::<_, CardState>(
+            "SELECT * FROM card_states WHERE card_id = ANY($1) AND user_id = $2",
         )
-        .bind(card.id)
+        .bind(&card_ids)
         .bind(auth_user.user_id)
-        .fetch_optional(&state.db)
-        .await?;
-
-        let sentences = sqlx::query_as::<_, Sentence>(
-            "SELECT * FROM sentences WHERE card_id = $1 ORDER BY is_primary DESC, created_at ASC",
+        .fetch_all(&state.db),
+        sqlx::query_as::<_, Sentence>(
+            "SELECT * FROM sentences WHERE card_id = ANY($1) ORDER BY is_primary DESC, created_at ASC",
         )
-        .bind(card.id)
-        .fetch_all(&state.db)
-        .await?;
+        .bind(&card_ids)
+        .fetch_all(&state.db),
+    )?;
 
-        card_responses.push(CardResponse {
-            id: card.id,
-            deck_id: card.deck_id,
-            lemma: card.lemma,
-            reading: card.reading,
-            definition: card.definition,
-            part_of_speech: card.part_of_speech,
-            frequency_rank: card.frequency_rank,
-            audio_url: card.audio_url,
-            notes: card.notes,
-            tags: card.tags,
-            sentences: sentences.into_iter().map(|s| s.into()).collect(),
-            state: state_result.map(|s| s.into()),
-        });
+    // Index by card_id for O(1) lookups
+    let mut states_by_card: HashMap<Uuid, CardState> = HashMap::with_capacity(card_states.len());
+    for cs in card_states {
+        states_by_card.insert(cs.card_id, cs);
     }
+
+    let mut sentences_by_card: HashMap<Uuid, Vec<Sentence>> = HashMap::with_capacity(cards.len());
+    for s in sentences {
+        sentences_by_card.entry(s.card_id).or_default().push(s);
+    }
+
+    let card_responses: Vec<CardResponse> = cards
+        .into_iter()
+        .map(|card| {
+            let card_id = card.id;
+            CardResponse {
+                id: card.id,
+                deck_id: card.deck_id,
+                lemma: card.lemma,
+                reading: card.reading,
+                definition: card.definition,
+                part_of_speech: card.part_of_speech,
+                frequency_rank: card.frequency_rank,
+                audio_url: card.audio_url,
+                notes: card.notes,
+                tags: card.tags,
+                sentences: sentences_by_card
+                    .remove(&card_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| s.into())
+                    .collect(),
+                state: states_by_card.remove(&card_id).map(|s| s.into()),
+            }
+        })
+        .collect();
 
     Ok(Json(CardListResponse {
         cards: card_responses,
@@ -187,39 +206,30 @@ pub async fn get(
     Path(id): Path<Uuid>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<CardResponse>> {
-    let card = sqlx::query_as::<_, Card>("SELECT * FROM cards WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(AppError::NotFound("Card not found".to_string()))?;
-
-    // Verify ownership through deck
-    let deck_owned = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM decks WHERE id = $1 AND user_id = $2",
+    // Single query with JOIN to verify ownership
+    let card = sqlx::query_as::<_, Card>(
+        "SELECT c.* FROM cards c JOIN decks d ON c.deck_id = d.id WHERE c.id = $1 AND d.user_id = $2",
     )
-    .bind(card.deck_id)
-    .bind(auth_user.user_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    if deck_owned == 0 {
-        return Err(AppError::NotFound("Card not found".to_string()));
-    }
-
-    let state_result = sqlx::query_as::<_, CardState>(
-        "SELECT * FROM card_states WHERE card_id = $1 AND user_id = $2",
-    )
-    .bind(card.id)
+    .bind(id)
     .bind(auth_user.user_id)
     .fetch_optional(&state.db)
-    .await?;
+    .await?
+    .ok_or(AppError::NotFound("Card not found".to_string()))?;
 
-    let sentences = sqlx::query_as::<_, Sentence>(
-        "SELECT * FROM sentences WHERE card_id = $1 ORDER BY is_primary DESC, created_at ASC",
-    )
-    .bind(card.id)
-    .fetch_all(&state.db)
-    .await?;
+    // Fetch state and sentences concurrently
+    let (state_result, sentences) = tokio::try_join!(
+        sqlx::query_as::<_, CardState>(
+            "SELECT * FROM card_states WHERE card_id = $1 AND user_id = $2",
+        )
+        .bind(card.id)
+        .bind(auth_user.user_id)
+        .fetch_optional(&state.db),
+        sqlx::query_as::<_, Sentence>(
+            "SELECT * FROM sentences WHERE card_id = $1 ORDER BY is_primary DESC, created_at ASC",
+        )
+        .bind(card.id)
+        .fetch_all(&state.db),
+    )?;
 
     Ok(Json(CardResponse {
         id: card.id,
@@ -243,28 +253,20 @@ pub async fn update(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<UpdateCardRequest>,
 ) -> AppResult<Json<CardResponse>> {
-    // Get card and verify ownership
-    let card = sqlx::query_as::<_, Card>("SELECT * FROM cards WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(AppError::NotFound("Card not found".to_string()))?;
-
-    let deck_owned = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM decks WHERE id = $1 AND user_id = $2",
+    // Get card with ownership check in one query
+    let card = sqlx::query_as::<_, Card>(
+        "SELECT c.* FROM cards c JOIN decks d ON c.deck_id = d.id WHERE c.id = $1 AND d.user_id = $2",
     )
-    .bind(card.deck_id)
+    .bind(id)
     .bind(auth_user.user_id)
-    .fetch_one(&state.db)
-    .await?;
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound("Card not found".to_string()))?;
 
-    if deck_owned == 0 {
-        return Err(AppError::NotFound("Card not found".to_string()));
-    }
+    let notes = req.notes.or(card.notes);
+    let tags = req.tags.unwrap_or(card.tags);
 
-    let notes = req.notes.or(card.notes.clone());
-    let tags = req.tags.unwrap_or(card.tags.clone());
-
+    // Update and fetch related data concurrently
     let updated_card = sqlx::query_as::<_, Card>(
         "UPDATE cards SET notes = $1, tags = $2, updated_at = NOW() WHERE id = $3 RETURNING *",
     )
@@ -274,20 +276,19 @@ pub async fn update(
     .fetch_one(&state.db)
     .await?;
 
-    let state_result = sqlx::query_as::<_, CardState>(
-        "SELECT * FROM card_states WHERE card_id = $1 AND user_id = $2",
-    )
-    .bind(updated_card.id)
-    .bind(auth_user.user_id)
-    .fetch_optional(&state.db)
-    .await?;
-
-    let sentences = sqlx::query_as::<_, Sentence>(
-        "SELECT * FROM sentences WHERE card_id = $1 ORDER BY is_primary DESC",
-    )
-    .bind(updated_card.id)
-    .fetch_all(&state.db)
-    .await?;
+    let (state_result, sentences) = tokio::try_join!(
+        sqlx::query_as::<_, CardState>(
+            "SELECT * FROM card_states WHERE card_id = $1 AND user_id = $2",
+        )
+        .bind(updated_card.id)
+        .bind(auth_user.user_id)
+        .fetch_optional(&state.db),
+        sqlx::query_as::<_, Sentence>(
+            "SELECT * FROM sentences WHERE card_id = $1 ORDER BY is_primary DESC",
+        )
+        .bind(updated_card.id)
+        .fetch_all(&state.db),
+    )?;
 
     Ok(Json(CardResponse {
         id: updated_card.id,
@@ -310,32 +311,22 @@ pub async fn suspend(
     Path(id): Path<Uuid>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // Verify ownership
-    let card = sqlx::query_as::<_, Card>("SELECT * FROM cards WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(AppError::NotFound("Card not found".to_string()))?;
-
-    let deck_owned = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM decks WHERE id = $1 AND user_id = $2",
-    )
-    .bind(card.deck_id)
-    .bind(auth_user.user_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    if deck_owned == 0 {
-        return Err(AppError::NotFound("Card not found".to_string()));
-    }
-
-    sqlx::query(
-        "UPDATE card_states SET suspended = true, suspended_at = NOW() WHERE card_id = $1 AND user_id = $2",
+    // Verify ownership and update in one query via subquery
+    let result = sqlx::query(
+        r#"
+        UPDATE card_states SET suspended = true, suspended_at = NOW()
+        WHERE card_id = $1 AND user_id = $2
+          AND EXISTS (SELECT 1 FROM cards c JOIN decks d ON c.deck_id = d.id WHERE c.id = $1 AND d.user_id = $2)
+        "#,
     )
     .bind(id)
     .bind(auth_user.user_id)
     .execute(&state.db)
     .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Card not found".to_string()));
+    }
 
     Ok(Json(serde_json::json!({ "message": "Card suspended" })))
 }
@@ -345,37 +336,23 @@ pub async fn reset(
     Path(id): Path<Uuid>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // Verify ownership
-    let card = sqlx::query_as::<_, Card>("SELECT * FROM cards WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(AppError::NotFound("Card not found".to_string()))?;
-
-    let deck_owned = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM decks WHERE id = $1 AND user_id = $2",
-    )
-    .bind(card.deck_id)
-    .bind(auth_user.user_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    if deck_owned == 0 {
-        return Err(AppError::NotFound("Card not found".to_string()));
-    }
-
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE card_states
         SET status = 'new', difficulty = 0, stability = 0, due_date = NULL,
             last_review = NULL, reps = 0, lapses = 0, suspended = false, suspended_at = NULL
         WHERE card_id = $1 AND user_id = $2
+          AND EXISTS (SELECT 1 FROM cards c JOIN decks d ON c.deck_id = d.id WHERE c.id = $1 AND d.user_id = $2)
         "#,
     )
     .bind(id)
     .bind(auth_user.user_id)
     .execute(&state.db)
     .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Card not found".to_string()));
+    }
 
     Ok(Json(serde_json::json!({ "message": "Card reset" })))
 }

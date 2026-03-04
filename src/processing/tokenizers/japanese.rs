@@ -1,14 +1,20 @@
 use super::Token;
 use lindera::tokenizer::Tokenizer;
 use serde_json::json;
+use std::sync::OnceLock;
+
+/// Cached global tokenizer — Lindera+IPADIC init is expensive, only do it once
+static JAPANESE_TOKENIZER: OnceLock<JapaneseTokenizer> = OnceLock::new();
 
 pub struct JapaneseTokenizer {
     tokenizer: Tokenizer,
 }
 
+// Safety: Lindera's Tokenizer uses &self for tokenize, so sharing across threads is fine
+unsafe impl Sync for JapaneseTokenizer {}
+
 impl JapaneseTokenizer {
     pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // Lindera 2.x config: dictionary is a string URI, not nested object
         let config = json!({
             "segmenter": {
                 "dictionary": "embedded://ipadic",
@@ -20,23 +26,25 @@ impl JapaneseTokenizer {
         Ok(Self { tokenizer })
     }
 
+    /// Get or initialize the global cached tokenizer
+    pub fn global() -> &'static JapaneseTokenizer {
+        JAPANESE_TOKENIZER.get_or_init(|| {
+            Self::new().expect("Failed to initialize Japanese tokenizer")
+        })
+    }
+
     pub fn tokenize(&self, text: &str) -> Vec<Token> {
         let mut tokens = Vec::new();
 
         if let Ok(mut result) = self.tokenizer.tokenize(text) {
-            for (i, token) in result.iter_mut().enumerate() {
+            tokens.reserve(result.len());
+            for token in result.iter_mut() {
                 let surface = token.surface.to_string();
 
-                // Call details() method to populate token details from dictionary
                 let details: Vec<String> = token.details()
                     .iter()
                     .map(|s| s.to_string())
                     .collect();
-
-                // Debug first few tokens
-                if i < 5 {
-                    tracing::info!("Raw token {}: surface={}, details={:?}", i, surface, details);
-                }
 
                 let pos = details.first().cloned().unwrap_or_default();
                 let lemma = details
@@ -90,7 +98,7 @@ impl JapaneseTokenizer {
     fn katakana_to_hiragana(text: &str) -> String {
         text.chars()
             .map(|c| {
-                if c >= 'ァ' && c <= 'ン' {
+                if ('ァ'..='ン').contains(&c) {
                     char::from_u32(c as u32 - 0x60).unwrap_or(c)
                 } else {
                     c

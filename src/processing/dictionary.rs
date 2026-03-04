@@ -75,12 +75,13 @@ fn load_dict_file(filename: &str) -> Result<HashMap<String, DictEntry>, Box<dyn 
 }
 
 /// Look up a word in the dictionary for a specific language.
-pub fn lookup(word: &str, language: &str) -> Option<DictEntry> {
-    DICTIONARIES.get()?.get(language)?.get(word).cloned()
+/// Returns a reference to avoid cloning on every lookup.
+pub fn lookup(word: &str, language: &str) -> Option<&'static DictEntry> {
+    DICTIONARIES.get()?.get(language)?.get(word)
 }
 
 /// Look up multiple words and return a map, for a specific language.
-pub fn lookup_many(words: &[String], language: &str) -> HashMap<String, DictEntry> {
+pub fn lookup_many<'a>(words: &'a [String], language: &str) -> HashMap<&'a str, &'static DictEntry> {
     let lang_dict = match DICTIONARIES.get().and_then(|d| d.get(language)) {
         Some(d) => d,
         None => return HashMap::new(),
@@ -88,7 +89,7 @@ pub fn lookup_many(words: &[String], language: &str) -> HashMap<String, DictEntr
 
     words
         .iter()
-        .filter_map(|w| lang_dict.get(w).map(|e| (w.clone(), e.clone())))
+        .filter_map(|w| lang_dict.get(w.as_str()).map(|e| (w.as_str(), e)))
         .collect()
 }
 

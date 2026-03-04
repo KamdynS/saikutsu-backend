@@ -8,7 +8,7 @@ use std::sync::Arc;
 use zip::ZipArchive;
 
 use crate::{
-    api::analyze::CreateDeckResult,
+    api::analyze::{self, CreateDeckResult},
     api::middleware::AuthUser,
     error::{AppError, AppResult},
     models::{Deck, DeckResponse},
@@ -50,18 +50,26 @@ pub async fn import_apkg(
         ));
     }
 
+    // Auto-detect language from card content
+    let sample_text: String = notes.iter()
+        .take(20)
+        .flat_map(|n| [n.front.as_str(), " ", n.back.as_str(), " "])
+        .collect();
+    let language = analyze::detect_language(&sample_text, None);
+
     // Create deck
     let settings = serde_json::json!({});
     let deck = sqlx::query_as::<_, Deck>(
         r#"
         INSERT INTO decks (user_id, name, description, language, source_type, settings)
-        VALUES ($1, $2, $3, 'ja', 'import', $4)
+        VALUES ($1, $2, $3, $4, 'import', $5)
         RETURNING *
         "#,
     )
     .bind(auth_user.user_id)
     .bind(&deck_name)
     .bind(format!("Imported from Anki - {} notes", notes.len()))
+    .bind(&language)
     .bind(&settings)
     .fetch_one(&state.db)
     .await?;

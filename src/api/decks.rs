@@ -52,25 +52,17 @@ pub async fn create(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<CreateDeckRequest>,
 ) -> AppResult<Json<DeckResponse>> {
-    // Validate language
-    let valid_languages = ["ja", "es", "fr", "de", "it", "pt"];
-    if !valid_languages.contains(&req.language.as_str()) {
-        return Err(AppError::Validation(format!(
-            "Invalid language. Supported: {}",
-            valid_languages.join(", ")
-        )));
-    }
-
     let deck_id = Uuid::new_v4();
     let settings = serde_json::json!({
         "new_cards_per_day": 20,
         "study_mode": "cloze"
     });
 
+    // Language is auto-detected when content is added; default to "ja" for empty decks
     let deck = sqlx::query_as::<_, Deck>(
         r#"
         INSERT INTO decks (id, user_id, name, description, language, source_type, settings)
-        VALUES ($1, $2, $3, $4, $5, 'import', $6)
+        VALUES ($1, $2, $3, $4, 'ja', 'import', $5)
         RETURNING *
         "#,
     )
@@ -78,7 +70,6 @@ pub async fn create(
     .bind(auth_user.user_id)
     .bind(&req.name)
     .bind(&req.description)
-    .bind(&req.language)
     .bind(&settings)
     .fetch_one(&state.db)
     .await?;

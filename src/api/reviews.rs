@@ -20,81 +20,73 @@ pub async fn get_queue(
 ) -> AppResult<Json<ReviewQueueResponse>> {
     let today = Utc::now().date_naive();
 
-    // Get due reviews and new cards
-    // DISTINCT ON lemma deduplicates same words across decks, keeping the most urgent one
-    let items = sqlx::query_as::<_, ReviewQueueRow>(
-        r#"
-        SELECT DISTINCT ON (c.lemma)
-            cs.id as card_state_id,
-            c.id as card_id,
-            c.deck_id,
-            d.name as deck_name,
-            c.lemma,
-            c.reading,
-            c.definition,
-            cs.status,
-            cs.due_date,
-            s.text as sentence_text,
-            s.cloze_text,
-            s.cloze_answer
-        FROM card_states cs
-        JOIN cards c ON cs.card_id = c.id
-        JOIN decks d ON c.deck_id = d.id
-        LEFT JOIN sentences s ON s.card_id = c.id AND s.is_primary = true
-        WHERE cs.user_id = $1
-          AND cs.suspended = false
-          AND (
-            cs.status = 'new'
-            OR (cs.due_date <= $2 AND cs.status IN ('learning', 'review', 'relearning'))
-          )
-        ORDER BY
-          c.lemma,
-          CASE cs.status
-            WHEN 'relearning' THEN 0
-            WHEN 'learning' THEN 1
-            WHEN 'review' THEN 2
-            WHEN 'new' THEN 3
-          END,
-          cs.due_date ASC NULLS LAST,
-          cs.created_at ASC
-        "#,
-    )
-    .bind(auth_user.user_id)
-    .bind(today)
-    .fetch_all(&state.db)
-    .await?;
-
-    // Re-sort by priority since DISTINCT ON requires ordering by lemma first
-    let mut items = items;
-    items.sort_by(|a, b| {
-        let status_priority = |s: &str| match s {
-            "relearning" => 0,
-            "learning" => 1,
-            "review" => 2,
-            "new" => 3,
-            _ => 4,
-        };
-        status_priority(&a.status)
-            .cmp(&status_priority(&b.status))
-            .then_with(|| a.due_date.cmp(&b.due_date))
-    });
-    let items: Vec<_> = items.into_iter().take(200).collect();
-
-    // Count totals
-    let counts = sqlx::query_as::<_, ReviewCounts>(
-        r#"
-        SELECT
-            COUNT(*) FILTER (WHERE status = 'new' AND NOT suspended) as total_new,
-            COUNT(*) FILTER (WHERE status = 'learning' AND NOT suspended) as total_learning,
-            COUNT(*) FILTER (WHERE due_date <= $2 AND status IN ('review', 'relearning') AND NOT suspended) as total_due
-        FROM card_states
-        WHERE user_id = $1
-        "#,
-    )
-    .bind(auth_user.user_id)
-    .bind(today)
-    .fetch_one(&state.db)
-    .await?;
+    // Run queue fetch and counts concurrently
+    let (items, counts) = tokio::try_join!(
+        sqlx::query_as::<_, ReviewQueueRow>(
+            r#"
+            SELECT * FROM (
+                SELECT DISTINCT ON (c.lemma)
+                    cs.id as card_state_id,
+                    c.id as card_id,
+                    c.deck_id,
+                    d.name as deck_name,
+                    c.lemma,
+                    c.reading,
+                    c.definition,
+                    cs.status,
+                    cs.due_date,
+                    s.text as sentence_text,
+                    s.cloze_text,
+                    s.cloze_answer
+                FROM card_states cs
+                JOIN cards c ON cs.card_id = c.id
+                JOIN decks d ON c.deck_id = d.id
+                LEFT JOIN sentences s ON s.card_id = c.id AND s.is_primary = true
+                WHERE cs.user_id = $1
+                  AND cs.suspended = false
+                  AND (
+                    cs.status = 'new'
+                    OR (cs.due_date <= $2 AND cs.status IN ('learning', 'review', 'relearning'))
+                  )
+                ORDER BY
+                  c.lemma,
+                  CASE cs.status
+                    WHEN 'relearning' THEN 0
+                    WHEN 'learning' THEN 1
+                    WHEN 'review' THEN 2
+                    WHEN 'new' THEN 3
+                  END,
+                  cs.due_date ASC NULLS LAST,
+                  cs.created_at ASC
+            ) deduped
+            ORDER BY
+              CASE status
+                WHEN 'relearning' THEN 0
+                WHEN 'learning' THEN 1
+                WHEN 'review' THEN 2
+                WHEN 'new' THEN 3
+              END,
+              due_date ASC NULLS LAST
+            LIMIT 200
+            "#,
+        )
+        .bind(auth_user.user_id)
+        .bind(today)
+        .fetch_all(&state.db),
+        sqlx::query_as::<_, ReviewCounts>(
+            r#"
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'new' AND NOT suspended) as total_new,
+                COUNT(*) FILTER (WHERE status = 'learning' AND NOT suspended) as total_learning,
+                COUNT(*) FILTER (WHERE due_date <= $2 AND status IN ('review', 'relearning') AND NOT suspended) as total_due
+            FROM card_states
+            WHERE user_id = $1
+            "#,
+        )
+        .bind(auth_user.user_id)
+        .bind(today)
+        .fetch_one(&state.db),
+    )?;
 
     let queue_items: Vec<ReviewQueueItem> = items
         .into_iter()

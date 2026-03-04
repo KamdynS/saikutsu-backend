@@ -41,8 +41,8 @@ pub fn rank_by_frequency(
     corpus_freq: &HashMap<String, i32>,
 ) -> Vec<WordFrequency> {
     let mut words: Vec<WordFrequency> = word_counts
-        .into_iter()
-        .map(|(_, mut wf)| {
+        .into_values()
+        .map(|mut wf| {
             wf.corpus_rank = corpus_freq.get(&wf.lemma).copied();
             wf
         })

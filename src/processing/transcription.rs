@@ -146,17 +146,7 @@ pub async fn transcribe_chunk(
         .part("file", file_part);
 
     if let Some(lang) = language {
-        // Map our language codes to OpenAI's expected codes
-        let openai_lang = match lang {
-            "ja" => "ja",
-            "es" => "es",
-            "fr" => "fr",
-            "de" => "de",
-            "it" => "it",
-            "pt" => "pt",
-            _ => lang,
-        };
-        form = form.text("language", openai_lang.to_string());
+        form = form.text("language", lang.to_string());
     }
 
     let response = client
