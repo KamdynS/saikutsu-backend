@@ -1,26 +1,20 @@
 use super::Token;
-use rust_stemmers::{Algorithm, Stemmer};
+use crate::processing::lemma_dict;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub struct EuropeanTokenizer {
     language: String,
-    stemmer: Stemmer,
 }
 
 impl EuropeanTokenizer {
     pub fn new(language: &str) -> Result<Self, String> {
-        let algorithm = match language {
-            "es" => Algorithm::Spanish,
-            "fr" => Algorithm::French,
-            "de" => Algorithm::German,
-            "it" => Algorithm::Italian,
-            "pt" => Algorithm::Portuguese,
-            _ => return Err(format!("Unsupported language: {}", language)),
-        };
+        let valid = ["es", "fr", "de", "it", "pt"];
+        if !valid.contains(&language) {
+            return Err(format!("Unsupported language: {}", language));
+        }
 
         Ok(Self {
             language: language.to_string(),
-            stemmer: Stemmer::create(algorithm),
         })
     }
 
@@ -29,13 +23,16 @@ impl EuropeanTokenizer {
 
         for word in text.unicode_words() {
             let lower = word.to_lowercase();
-            let stem = self.stemmer.stem(&lower).to_string();
+
+            // Dictionary-based lemmatization: look up the word form → lemma
+            let lemma = lemma_dict::lookup_lemma(&lower, &self.language)
+                .unwrap_or_else(|| lower.clone());
 
             let is_content = self.is_content_word(&lower);
 
             tokens.push(Token {
                 surface: word.to_string(),
-                lemma: stem,
+                lemma,
                 reading: String::new(),
                 pos: String::new(),
                 is_content,
@@ -78,6 +75,7 @@ impl EuropeanTokenizer {
                 "hacer", "o", "poder", "decir", "este", "ir", "otro", "ese", "si", "me", "ya",
                 "ver", "porque", "dar", "cuando", "el", "muy", "sin", "vez", "mucho", "saber",
                 "que", "sobre", "mi", "alguno", "mismo", "yo", "tambien", "hasta",
+                "una", "los", "las", "del", "al", "es", "son", "ha", "nos", "más",
             ],
             "fr" => &[
                 "le", "la", "de", "et", "en", "un", "etre", "que", "avoir", "ne", "je", "son",
@@ -85,6 +83,7 @@ impl EuropeanTokenizer {
                 "elle", "comme", "mais", "ou", "nous", "avec", "dans", "leur", "au", "du", "dire",
                 "lui", "cette", "si", "sans", "mon", "bien", "ou", "meme", "vous", "y", "rien",
                 "aussi", "autre", "peu", "tres", "quand", "aller",
+                "les", "des", "une", "est", "sont",
             ],
             "de" => &[
                 "der", "die", "und", "in", "den", "von", "zu", "das", "mit", "sich", "des", "auf",

@@ -25,7 +25,6 @@ pdf-extract = "0.7"
 lindera = { version = "2.2", features = ["embed-ipadic"] }
 
 # European NLP
-rust-stemmers = "1.2"
 unicode-segmentation = "1.12"
 
 # Utilities

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use saikutsu::{api, config::Config, db, processing::dictionary, AppState};
+use saikutsu::{api, config::Config, db, processing::{dictionary, lemma_dict}, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -30,9 +30,14 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Database ready");
 
-    // Load JMdict dictionary
+    // Load JMdict dictionary (Japanese)
     if let Err(e) = dictionary::load_dictionary() {
-        tracing::warn!("Failed to load JMdict: {}. Definitions will be unavailable.", e);
+        tracing::warn!("Failed to load JMdict: {}. Japanese definitions will be unavailable.", e);
+    }
+
+    // Load lemmatization dictionaries (European languages)
+    if let Err(e) = lemma_dict::load_lemma_dictionaries() {
+        tracing::warn!("Failed to load lemma dictionaries: {}. European lemmatization will fall back to lowercase forms.", e);
     }
 
     let state = Arc::new(AppState {
