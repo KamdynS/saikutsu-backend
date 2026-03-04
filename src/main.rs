@@ -40,16 +40,29 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("Failed to load lemma dictionaries: {}. European lemmatization will fall back to lowercase forms.", e);
     }
 
-    let jwks_cache = config.supabase_url.as_ref().map(|url| {
+    // Fetch JWKS keys at startup using our rustls-backed reqwest
+    let jwks_keys = if let Some(ref url) = config.supabase_url {
         let jwks_url = format!("{}/auth/v1/.well-known/jwks.json", url.trim_end_matches('/'));
-        tracing::info!("Initializing JWKS cache from {}", jwks_url);
-        supabase_jwt::JwksCache::new(&jwks_url)
-    });
+        tracing::info!("Fetching JWKS from {}", jwks_url);
+        match api::middleware::fetch_jwks_keys(&jwks_url).await {
+            Ok(keys) => {
+                tracing::info!("Loaded {} JWKS key(s)", keys.len());
+                keys
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch JWKS at startup: {}. Auth will not work.", e);
+                vec![]
+            }
+        }
+    } else {
+        tracing::warn!("SUPABASE_URL not set — ES256 JWT validation disabled");
+        vec![]
+    };
 
     let state = Arc::new(AppState {
         db: pool,
         config: config.clone(),
-        jwks_cache,
+        jwks_keys,
     });
 
     // Build CORS layer

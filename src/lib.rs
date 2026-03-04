@@ -12,11 +12,11 @@ pub use error::{AppError, AppResult};
 
 use std::sync::Arc;
 
-#[derive(Clone)]
 pub struct AppState {
     pub db: sqlx::PgPool,
     pub config: Config,
-    pub jwks_cache: Option<supabase_jwt::JwksCache>,
+    /// Cached JWKS decoding keys fetched at startup
+    pub jwks_keys: Vec<(Option<String>, jsonwebtoken::DecodingKey)>,
 }
 
 pub type SharedAppState = Arc<AppState>;
