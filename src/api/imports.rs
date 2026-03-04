@@ -11,7 +11,7 @@ use crate::{
     api::analyze::CreateDeckResult,
     api::middleware::AuthUser,
     error::{AppError, AppResult},
-    models::{Card, Deck, DeckResponse},
+    models::{Deck, DeckResponse},
     AppState,
 };
 
@@ -66,30 +66,36 @@ pub async fn import_apkg(
     .fetch_one(&state.db)
     .await?;
 
-    // Create cards from notes
-    let mut cards_created = 0;
-    for note in &notes {
-        let card = sqlx::query_as::<_, Card>(
-            r#"
-            INSERT INTO cards (deck_id, lemma, definition)
-            VALUES ($1, $2, $3)
-            RETURNING *
-            "#,
-        )
-        .bind(deck.id)
-        .bind(&note.front)
-        .bind(&note.back)
-        .fetch_one(&state.db)
-        .await?;
+    // Batch insert all cards at once
+    let lemmas: Vec<&str> = notes.iter().map(|n| n.front.as_str()).collect();
+    let definitions: Vec<&str> = notes.iter().map(|n| n.back.as_str()).collect();
 
-        sqlx::query("INSERT INTO card_states (user_id, card_id, status) VALUES ($1, $2, 'new')")
-            .bind(auth_user.user_id)
-            .bind(card.id)
-            .execute(&state.db)
-            .await?;
+    let card_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r#"
+        INSERT INTO cards (deck_id, lemma, definition)
+        SELECT $1, unnest($2::text[]), unnest($3::text[])
+        RETURNING id
+        "#,
+    )
+    .bind(deck.id)
+    .bind(&lemmas)
+    .bind(&definitions)
+    .fetch_all(&state.db)
+    .await?;
 
-        cards_created += 1;
-    }
+    let cards_created = card_ids.len();
+
+    // Batch insert all card_states
+    sqlx::query(
+        r#"
+        INSERT INTO card_states (user_id, card_id, status)
+        SELECT $1, unnest($2::uuid[]), 'new'
+        "#,
+    )
+    .bind(auth_user.user_id)
+    .bind(&card_ids)
+    .execute(&state.db)
+    .await?;
 
     // Update deck card count
     sqlx::query("UPDATE decks SET card_count = $1, new_count = $1 WHERE id = $2")
