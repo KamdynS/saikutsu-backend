@@ -28,82 +28,155 @@ pub async fn get_queue(
 ) -> AppResult<Json<ReviewQueueResponse>> {
     let start = Instant::now();
     let today = Utc::now().date_naive();
+    tracing::info!(deck_id = ?query.deck_id, "reviews::get_queue called");
 
     // Run queue fetch and counts concurrently
-    // When deck_id is provided, filter to that deck only
+    // Use separate queries for filtered vs unfiltered to avoid nullable param issues
     let db_start = Instant::now();
-    let (items, counts) = tokio::try_join!(
-        sqlx::query_as::<_, ReviewQueueRow>(
-            r#"
-            SELECT * FROM (
-                SELECT DISTINCT ON (c.lemma)
-                    cs.id as card_state_id,
-                    c.id as card_id,
-                    c.deck_id,
-                    d.name as deck_name,
-                    c.lemma,
-                    c.reading,
-                    c.definition,
-                    cs.status,
-                    cs.due_date,
-                    s.text as sentence_text,
-                    s.cloze_text,
-                    s.cloze_answer
-                FROM card_states cs
-                JOIN cards c ON cs.card_id = c.id
-                JOIN decks d ON c.deck_id = d.id
-                LEFT JOIN sentences s ON s.card_id = c.id AND s.is_primary = true
-                WHERE cs.user_id = $1
-                  AND cs.suspended = false
-                  AND ($3::uuid IS NULL OR c.deck_id = $3)
-                  AND (
-                    cs.status = 'new'
-                    OR (cs.due_date <= $2 AND cs.status IN ('learning', 'review', 'relearning'))
-                  )
-                ORDER BY
-                  c.lemma,
-                  CASE cs.status
-                    WHEN 'relearning' THEN 0
-                    WHEN 'learning' THEN 1
-                    WHEN 'review' THEN 2
-                    WHEN 'new' THEN 3
-                  END,
-                  cs.due_date ASC NULLS LAST,
-                  cs.created_at ASC
-            ) deduped
-            ORDER BY
-              CASE status
-                WHEN 'relearning' THEN 0
-                WHEN 'learning' THEN 1
-                WHEN 'review' THEN 2
-                WHEN 'new' THEN 3
-              END,
-              due_date ASC NULLS LAST
-            LIMIT 200
-            "#,
-        )
-        .bind(auth_user.user_id)
-        .bind(today)
-        .bind(query.deck_id)
-        .fetch_all(&state.db),
-        sqlx::query_as::<_, ReviewCounts>(
-            r#"
-            SELECT
-                COUNT(*) FILTER (WHERE status = 'new' AND NOT suspended) as total_new,
-                COUNT(*) FILTER (WHERE status = 'learning' AND NOT suspended) as total_learning,
-                COUNT(*) FILTER (WHERE due_date <= $2 AND status IN ('review', 'relearning') AND NOT suspended) as total_due
-            FROM card_states cs
-            WHERE user_id = $1
-              AND ($3::uuid IS NULL OR EXISTS (
-                SELECT 1 FROM cards c WHERE c.id = cs.card_id AND c.deck_id = $3
-              ))
-            "#,
-        )
-        .bind(auth_user.user_id)
-        .bind(today)
-        .bind(query.deck_id)
-        .fetch_one(&state.db),
-    )?;
+    let (items, counts) = match query.deck_id {
+        Some(deck_id) => {
+            // Filtered to a specific deck
+            tokio::try_join!(
+                sqlx::query_as::<_, ReviewQueueRow>(
+                    r#"
+                    SELECT * FROM (
+                        SELECT DISTINCT ON (c.lemma)
+                            cs.id as card_state_id,
+                            c.id as card_id,
+                            c.deck_id,
+                            d.name as deck_name,
+                            c.lemma,
+                            c.reading,
+                            c.definition,
+                            cs.status,
+                            cs.due_date,
+                            s.text as sentence_text,
+                            s.cloze_text,
+                            s.cloze_answer
+                        FROM card_states cs
+                        JOIN cards c ON cs.card_id = c.id
+                        JOIN decks d ON c.deck_id = d.id
+                        LEFT JOIN sentences s ON s.card_id = c.id AND s.is_primary = true
+                        WHERE cs.user_id = $1
+                          AND cs.suspended = false
+                          AND c.deck_id = $3
+                          AND (
+                            cs.status = 'new'
+                            OR (cs.due_date <= $2 AND cs.status IN ('learning', 'review', 'relearning'))
+                          )
+                        ORDER BY
+                          c.lemma,
+                          CASE cs.status
+                            WHEN 'relearning' THEN 0
+                            WHEN 'learning' THEN 1
+                            WHEN 'review' THEN 2
+                            WHEN 'new' THEN 3
+                          END,
+                          cs.due_date ASC NULLS LAST,
+                          cs.created_at ASC
+                    ) deduped
+                    ORDER BY
+                      CASE status
+                        WHEN 'relearning' THEN 0
+                        WHEN 'learning' THEN 1
+                        WHEN 'review' THEN 2
+                        WHEN 'new' THEN 3
+                      END,
+                      due_date ASC NULLS LAST
+                    LIMIT 200
+                    "#,
+                )
+                .bind(auth_user.user_id)
+                .bind(today)
+                .bind(deck_id)
+                .fetch_all(&state.db),
+                sqlx::query_as::<_, ReviewCounts>(
+                    r#"
+                    SELECT
+                        COUNT(*) FILTER (WHERE cs.status = 'new' AND NOT cs.suspended) as total_new,
+                        COUNT(*) FILTER (WHERE cs.status = 'learning' AND NOT cs.suspended) as total_learning,
+                        COUNT(*) FILTER (WHERE cs.due_date <= $2 AND cs.status IN ('review', 'relearning') AND NOT cs.suspended) as total_due
+                    FROM card_states cs
+                    JOIN cards c ON c.id = cs.card_id
+                    WHERE cs.user_id = $1 AND c.deck_id = $3
+                    "#,
+                )
+                .bind(auth_user.user_id)
+                .bind(today)
+                .bind(deck_id)
+                .fetch_one(&state.db),
+            )?
+        }
+        None => {
+            // All decks
+            tokio::try_join!(
+                sqlx::query_as::<_, ReviewQueueRow>(
+                    r#"
+                    SELECT * FROM (
+                        SELECT DISTINCT ON (c.lemma)
+                            cs.id as card_state_id,
+                            c.id as card_id,
+                            c.deck_id,
+                            d.name as deck_name,
+                            c.lemma,
+                            c.reading,
+                            c.definition,
+                            cs.status,
+                            cs.due_date,
+                            s.text as sentence_text,
+                            s.cloze_text,
+                            s.cloze_answer
+                        FROM card_states cs
+                        JOIN cards c ON cs.card_id = c.id
+                        JOIN decks d ON c.deck_id = d.id
+                        LEFT JOIN sentences s ON s.card_id = c.id AND s.is_primary = true
+                        WHERE cs.user_id = $1
+                          AND cs.suspended = false
+                          AND (
+                            cs.status = 'new'
+                            OR (cs.due_date <= $2 AND cs.status IN ('learning', 'review', 'relearning'))
+                          )
+                        ORDER BY
+                          c.lemma,
+                          CASE cs.status
+                            WHEN 'relearning' THEN 0
+                            WHEN 'learning' THEN 1
+                            WHEN 'review' THEN 2
+                            WHEN 'new' THEN 3
+                          END,
+                          cs.due_date ASC NULLS LAST,
+                          cs.created_at ASC
+                    ) deduped
+                    ORDER BY
+                      CASE status
+                        WHEN 'relearning' THEN 0
+                        WHEN 'learning' THEN 1
+                        WHEN 'review' THEN 2
+                        WHEN 'new' THEN 3
+                      END,
+                      due_date ASC NULLS LAST
+                    LIMIT 200
+                    "#,
+                )
+                .bind(auth_user.user_id)
+                .bind(today)
+                .fetch_all(&state.db),
+                sqlx::query_as::<_, ReviewCounts>(
+                    r#"
+                    SELECT
+                        COUNT(*) FILTER (WHERE status = 'new' AND NOT suspended) as total_new,
+                        COUNT(*) FILTER (WHERE status = 'learning' AND NOT suspended) as total_learning,
+                        COUNT(*) FILTER (WHERE due_date <= $2 AND status IN ('review', 'relearning') AND NOT suspended) as total_due
+                    FROM card_states
+                    WHERE user_id = $1
+                    "#,
+                )
+                .bind(auth_user.user_id)
+                .bind(today)
+                .fetch_one(&state.db),
+            )?
+        }
+    };
     tracing::info!(
         duration_ms = db_start.elapsed().as_millis() as u64,
         queue_items = items.len(),
