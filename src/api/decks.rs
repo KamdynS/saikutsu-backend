@@ -72,11 +72,18 @@ pub async fn create(
         "study_mode": "cloze"
     });
 
+    let valid_languages = ["ja", "es", "fr", "de", "it", "pt"];
+    let language = req
+        .language
+        .as_deref()
+        .filter(|l| valid_languages.contains(l))
+        .unwrap_or("ja");
+
     let db_start = Instant::now();
     let deck = sqlx::query_as::<_, Deck>(
         r#"
         INSERT INTO decks (id, user_id, name, description, language, source_type, settings)
-        VALUES ($1, $2, $3, $4, 'ja', 'import', $5)
+        VALUES ($1, $2, $3, $4, $5, 'import', $6)
         RETURNING *
         "#,
     )
@@ -84,6 +91,7 @@ pub async fn create(
     .bind(auth_user.user_id)
     .bind(&req.name)
     .bind(&req.description)
+    .bind(language)
     .bind(&settings)
     .fetch_one(&state.db)
     .await?;

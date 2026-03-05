@@ -290,8 +290,13 @@ fn count_script_chars(text: &str) -> (usize, usize) {
     (cjk, latin)
 }
 
-/// If front fields are predominantly Latin and back fields are predominantly CJK,
-/// swap them so the CJK word is always the lemma (front) and English is the definition (back).
+/// Detect if fields are swapped and fix so the foreign word is always the lemma (front)
+/// and the English definition is always the back.
+///
+/// Handles two cases:
+/// 1. CJK decks: If fronts are Latin and backs are CJK, swap.
+/// 2. European decks: If fronts look like English (multi-word definitions) and backs look
+///    like single foreign words, swap.
 fn maybe_swap_fields(mut notes: Vec<AnkiNote>) -> Vec<AnkiNote> {
     let sample_size = notes.len().min(30);
     let mut front_cjk = 0usize;
@@ -308,14 +313,61 @@ fn maybe_swap_fields(mut notes: Vec<AnkiNote>) -> Vec<AnkiNote> {
         back_latin += bl;
     }
 
-    // Swap if fronts are mostly Latin and backs are mostly CJK
-    let should_swap = front_latin > front_cjk && back_cjk > back_latin && back_cjk > 5;
+    // Case 1: CJK swap — fronts are mostly Latin, backs are mostly CJK
+    let cjk_swap = front_latin > front_cjk && back_cjk > back_latin && back_cjk > 5;
 
-    if should_swap {
+    // Case 2: European language swap — both sides are Latin, but front looks like
+    // English definitions (longer, multi-word) and back looks like single foreign words.
+    // Heuristic: if front fields are significantly longer on average (English definitions
+    // tend to be multi-word) and contain common English words, swap them.
+    let european_swap = if !cjk_swap && front_cjk < 5 && back_cjk < 5 {
+        let mut front_english_score = 0usize;
+        let mut back_english_score = 0usize;
+
+        for note in notes.iter().take(sample_size) {
+            front_english_score += english_score(&note.front);
+            back_english_score += english_score(&note.back);
+        }
+
+        // Swap if fronts are significantly more English than backs
+        front_english_score > back_english_score * 2 && front_english_score > sample_size
+    } else {
+        false
+    };
+
+    if cjk_swap || european_swap {
         for note in &mut notes {
             std::mem::swap(&mut note.front, &mut note.back);
         }
     }
 
     notes
+}
+
+/// Score how "English" a text looks based on common English words and patterns.
+fn english_score(text: &str) -> usize {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    let mut score = 0;
+
+    // Multi-word text is more likely to be a definition than a vocabulary word
+    if words.len() > 2 {
+        score += 1;
+    }
+
+    // Common English function words that appear in definitions
+    const ENGLISH_MARKERS: &[&str] = &[
+        "the", "a", "an", "to", "of", "in", "is", "for", "and", "or", "with",
+        "that", "this", "it", "be", "as", "on", "not", "by", "from", "at",
+        "are", "was", "have", "has", "do", "does", "will", "would", "can",
+        "could", "should", "may", "might", "but", "if", "when", "than",
+    ];
+
+    for word in &words {
+        if ENGLISH_MARKERS.contains(word) {
+            score += 1;
+        }
+    }
+
+    score
 }
