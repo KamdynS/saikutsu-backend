@@ -1092,7 +1092,7 @@ async fn create_cards_from_analysis(
         auth_user: &AuthUser,
         deck: &Deck,
         card_data_list: &[CardData],
-        sentences: &[(usize, String, String, String, bool)], // (card_data_idx, text, cloze_text, cloze_answer, is_primary)
+        sentences: &[(usize, String, String, String, String, bool)], // (card_data_idx, text, cloze_text, cloze_answer, surface_form, is_primary)
         language: &str,
     ) -> AppResult<(usize, usize)> {
         if card_data_list.is_empty() {
@@ -1152,14 +1152,16 @@ async fn create_cards_from_analysis(
         let mut sent_texts: Vec<String> = Vec::new();
         let mut sent_cloze_texts: Vec<String> = Vec::new();
         let mut sent_cloze_answers: Vec<String> = Vec::new();
+        let mut sent_surface_forms: Vec<String> = Vec::new();
         let mut sent_is_primary: Vec<bool> = Vec::new();
 
-        for (card_data_idx, text, cloze_text, cloze_answer, is_primary) in sentences {
+        for (card_data_idx, text, cloze_text, cloze_answer, surface_form, is_primary) in sentences {
             if let Some(card_id) = idx_to_card_id.get(card_data_idx) {
                 sent_card_ids.push(*card_id);
                 sent_texts.push(text.clone());
                 sent_cloze_texts.push(cloze_text.clone());
                 sent_cloze_answers.push(cloze_answer.clone());
+                sent_surface_forms.push(surface_form.clone());
                 sent_is_primary.push(*is_primary);
             }
         }
@@ -1168,14 +1170,15 @@ async fn create_cards_from_analysis(
         if !sent_card_ids.is_empty() {
             sqlx::query(
                 r#"
-                INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, is_primary)
-                SELECT unnest($1::uuid[]), unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), unnest($5::bool[])
+                INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, surface_form, is_primary)
+                SELECT unnest($1::uuid[]), unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), unnest($5::text[]), unnest($6::bool[])
                 "#,
             )
             .bind(&sent_card_ids)
             .bind(&sent_texts)
             .bind(&sent_cloze_texts)
             .bind(&sent_cloze_answers)
+            .bind(&sent_surface_forms)
             .bind(&sent_is_primary)
             .execute(&state.db)
             .await?;
@@ -1260,7 +1263,7 @@ async fn create_cards_from_analysis(
     if want_i_plus_one {
         if let Some(c_deck) = cloze_deck {
             let mut cloze_card_data: Vec<CardData> = Vec::new();
-            let mut cloze_sentences: Vec<(usize, String, String, String, bool)> = Vec::new();
+            let mut cloze_sentences: Vec<(usize, String, String, String, String, bool)> = Vec::new();
 
             for wd in &word_data_list {
                 if !wd.has_i_plus_one {
@@ -1289,7 +1292,7 @@ async fn create_cards_from_analysis(
                 });
 
                 for (i, (sentence, cloze_text, cloze_answer)) in i1_sentences.iter().enumerate() {
-                    cloze_sentences.push((idx, sentence.clone(), cloze_text.clone(), cloze_answer.clone(), i == 0));
+                    cloze_sentences.push((idx, sentence.clone(), cloze_text.clone(), cloze_answer.clone(), cloze_answer.clone(), i == 0));
                 }
             }
 
@@ -1307,7 +1310,7 @@ async fn create_cards_from_analysis(
     if want_word_def {
         if let Some(d_deck) = def_deck {
             let mut def_card_data: Vec<CardData> = Vec::new();
-            let mut def_sentences: Vec<(usize, String, String, String, bool)> = Vec::new();
+            let mut def_sentences: Vec<(usize, String, String, String, String, bool)> = Vec::new();
 
             for wd in &word_data_list {
                 let idx = def_card_data.len();
@@ -1339,7 +1342,8 @@ async fn create_cards_from_analysis(
                             }
                         }
 
-                        def_sentences.push((idx, sentence.clone(), cloze_text, cloze_answer, i == 0));
+                        let surface = cloze_answer.clone();
+                        def_sentences.push((idx, sentence.clone(), cloze_text, cloze_answer, surface, i == 0));
                     }
                 }
             }

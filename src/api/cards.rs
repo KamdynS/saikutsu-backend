@@ -199,8 +199,8 @@ pub async fn create(
         let db_start = Instant::now();
         let sentence = sqlx::query_as::<_, Sentence>(
             r#"
-            INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, is_primary)
-            VALUES ($1, $2, $3, $4, true)
+            INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, surface_form, is_primary)
+            VALUES ($1, $2, $3, $4, $5, true)
             RETURNING *
             "#,
         )
@@ -208,6 +208,7 @@ pub async fn create(
         .bind(sentence_text)
         .bind(&cloze_text)
         .bind(&req.lemma)
+        .bind(&req.lemma) // For manual creation, surface_form = lemma (no sentence context to derive it)
         .fetch_one(&state.db)
         .await?;
         tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::create insert sentence");

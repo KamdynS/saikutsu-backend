@@ -36,6 +36,7 @@ pub struct ProcessedWord {
 pub struct ExtractedSentence {
     pub text: String,
     pub page: i32,
+    pub surface_form: String,
 }
 
 static PROCESSED_UPLOADS: Lazy<Mutex<HashMap<Uuid, ProcessedUpload>>> = 
@@ -144,6 +145,7 @@ pub async fn process_pdf(
                             .push(ExtractedSentence {
                                 text: sentence.clone(),
                                 page: page.page_num as i32,
+                                surface_form: token.surface.clone(),
                             });
                     }
                 }
@@ -288,17 +290,24 @@ pub async fn finalize_upload(
         // Add sentences (up to 3 per word)
         if let Some(sentences) = processed.sentences.get(&word.lemma) {
             for (i, sentence) in sentences.iter().take(3).enumerate() {
-                let cloze_text = sentence.text.replace(&word.lemma, "[...]");
+                // Use the surface form (word as it appeared) for cloze, falling back to lemma
+                let cloze_word = if sentence.text.contains(&sentence.surface_form) {
+                    &sentence.surface_form
+                } else {
+                    &word.lemma
+                };
+                let cloze_text = sentence.text.replace(cloze_word, "[...]");
                 sqlx::query(
                     r#"
-                    INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, source_page, is_primary)
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, surface_form, source_page, is_primary)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                     "#
                 )
                 .bind(card.id)
                 .bind(&sentence.text)
                 .bind(&cloze_text)
-                .bind(&word.lemma)
+                .bind(cloze_word)
+                .bind(&sentence.surface_form)
                 .bind(sentence.page)
                 .bind(i == 0) // First sentence is primary
                 .execute(pool)

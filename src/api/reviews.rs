@@ -52,7 +52,8 @@ pub async fn get_queue(
                             cs.due_date,
                             s.text as sentence_text,
                             s.cloze_text,
-                            s.cloze_answer
+                            s.cloze_answer,
+                            s.surface_form
                         FROM card_states cs
                         JOIN cards c ON cs.card_id = c.id
                         JOIN decks d ON c.deck_id = d.id
@@ -125,7 +126,8 @@ pub async fn get_queue(
                             cs.due_date,
                             s.text as sentence_text,
                             s.cloze_text,
-                            s.cloze_answer
+                            s.cloze_answer,
+                            s.surface_form
                         FROM card_states cs
                         JOIN cards c ON cs.card_id = c.id
                         JOIN decks d ON c.deck_id = d.id
@@ -200,6 +202,7 @@ pub async fn get_queue(
                 text,
                 cloze_text: row.cloze_text.unwrap_or_default(),
                 cloze_answer: row.cloze_answer.unwrap_or_default(),
+                surface_form: row.surface_form.unwrap_or_default(),
             }),
         })
         .collect();
@@ -339,6 +342,7 @@ struct ReviewQueueRow {
     sentence_text: Option<String>,
     cloze_text: Option<String>,
     cloze_answer: Option<String>,
+    surface_form: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

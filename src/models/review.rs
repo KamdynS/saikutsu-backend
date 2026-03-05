@@ -62,6 +62,7 @@ pub struct SentenceForReview {
     pub text: String,
     pub cloze_text: String,
     pub cloze_answer: String,
+    pub surface_form: String,
 }
 
 #[derive(Debug, Serialize)]
