@@ -5,6 +5,7 @@ use axum::{
 use rusqlite::Connection;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
+use std::time::Instant;
 use zip::ZipArchive;
 
 use crate::{
@@ -22,8 +23,11 @@ pub async fn import_apkg(
     Extension(auth_user): Extension<AuthUser>,
     mut multipart: Multipart,
 ) -> AppResult<Json<CreateDeckResult>> {
+    let start = Instant::now();
+
     let mut apkg_bytes: Option<Vec<u8>> = None;
 
+    let upload_start = Instant::now();
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().map(|s| s.to_string());
         if let Some("file") = field_name.as_deref() {
@@ -34,17 +38,22 @@ pub async fn import_apkg(
             apkg_bytes = Some(bytes.to_vec());
         }
     }
+    tracing::info!(duration_ms = upload_start.elapsed().as_millis() as u64, "imports::import_apkg read upload");
 
     let apkg_bytes =
         apkg_bytes.ok_or_else(|| AppError::BadRequest("No file provided".to_string()))?;
 
     // Extract SQLite DB from ZIP
+    let extract_start = Instant::now();
     let sqlite_bytes = extract_sqlite_from_apkg(&apkg_bytes)
         .map_err(|e| AppError::BadRequest(format!("Invalid .apkg file: {}", e)))?;
+    tracing::info!(duration_ms = extract_start.elapsed().as_millis() as u64, "imports::import_apkg extract sqlite");
 
     // Read notes from the SQLite DB
+    let read_start = Instant::now();
     let (deck_name, notes) = read_anki_db(&sqlite_bytes)
         .map_err(|e| AppError::BadRequest(format!("Failed to read Anki database: {}", e)))?;
+    tracing::info!(duration_ms = read_start.elapsed().as_millis() as u64, notes = notes.len(), "imports::import_apkg read anki db");
 
     if notes.is_empty() {
         return Err(AppError::BadRequest(
@@ -63,6 +72,7 @@ pub async fn import_apkg(
     let language = analyze::detect_language(&sample_text, None);
 
     // Create deck
+    let db_start = Instant::now();
     let settings = serde_json::json!({});
     let deck = sqlx::query_as::<_, Deck>(
         r#"
@@ -78,8 +88,10 @@ pub async fn import_apkg(
     .bind(&settings)
     .fetch_one(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "imports::import_apkg create deck");
 
     // Batch insert all cards at once
+    let db_start = Instant::now();
     let lemmas: Vec<&str> = notes.iter().map(|n| n.front.as_str()).collect();
     let definitions: Vec<&str> = notes.iter().map(|n| n.back.as_str()).collect();
 
@@ -95,17 +107,21 @@ pub async fn import_apkg(
     .bind(&definitions)
     .fetch_all(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, cards = card_ids.len(), "imports::import_apkg batch insert cards");
 
     let cards_created = card_ids.len();
 
     // Add imported lemmas to known_words
+    let db_start = Instant::now();
     let normalized_lemmas: Vec<String> = notes.iter()
         .map(|n| normalize_lemma(&n.front, &language))
         .collect();
     let lemma_refs: Vec<&str> = normalized_lemmas.iter().map(|s| s.as_str()).collect();
     known_words_service::add_known_words(&state.db, auth_user.user_id, &language, &lemma_refs).await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "imports::import_apkg add known_words");
 
     // Batch insert all card_states
+    let db_start = Instant::now();
     sqlx::query(
         r#"
         INSERT INTO card_states (user_id, card_id, status)
@@ -116,13 +132,18 @@ pub async fn import_apkg(
     .bind(&card_ids)
     .execute(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "imports::import_apkg batch insert card_states");
 
     // Update deck card count
+    let db_start = Instant::now();
     sqlx::query("UPDATE decks SET card_count = $1, new_count = $1 WHERE id = $2")
         .bind(cards_created as i32)
         .bind(deck.id)
         .execute(&state.db)
         .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "imports::import_apkg update deck counts");
+
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, cards = cards_created, "imports::import_apkg total");
 
     Ok(Json(CreateDeckResult {
         deck: DeckResponse::from(deck),

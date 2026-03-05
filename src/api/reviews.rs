@@ -1,6 +1,7 @@
 use axum::{extract::State, Extension, Json};
 use chrono::{NaiveDate, Utc};
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::{
@@ -18,9 +19,11 @@ pub async fn get_queue(
     State(state): State<Arc<AppState>>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<ReviewQueueResponse>> {
+    let start = Instant::now();
     let today = Utc::now().date_naive();
 
     // Run queue fetch and counts concurrently
+    let db_start = Instant::now();
     let (items, counts) = tokio::try_join!(
         sqlx::query_as::<_, ReviewQueueRow>(
             r#"
@@ -87,6 +90,13 @@ pub async fn get_queue(
         .bind(today)
         .fetch_one(&state.db),
     )?;
+    tracing::info!(
+        duration_ms = db_start.elapsed().as_millis() as u64,
+        queue_items = items.len(),
+        total_new = counts.total_new,
+        total_due = counts.total_due,
+        "reviews::get_queue db queries"
+    );
 
     let queue_items: Vec<ReviewQueueItem> = items
         .into_iter()
@@ -107,6 +117,8 @@ pub async fn get_queue(
         })
         .collect();
 
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "reviews::get_queue total");
+
     Ok(Json(ReviewQueueResponse {
         items: queue_items,
         total_due: counts.total_due,
@@ -120,12 +132,15 @@ pub async fn submit(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<SubmitReviewRequest>,
 ) -> AppResult<Json<ReviewResponse>> {
+    let start = Instant::now();
+
     // Validate rating
     if !(1..=4).contains(&req.rating) {
         return Err(AppError::Validation("Rating must be between 1 and 4".to_string()));
     }
 
     // Get current card state
+    let db_start = Instant::now();
     let card_state = sqlx::query_as::<_, CardStateRow>(
         "SELECT * FROM card_states WHERE card_id = $1 AND user_id = $2",
     )
@@ -134,10 +149,12 @@ pub async fn submit(
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("Card state not found".to_string()))?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "reviews::submit fetch card_state");
 
     let today = Utc::now().date_naive();
     let fsrs = FSRS::new(None);
 
+    let fsrs_start = Instant::now();
     let current_card = crate::fsrs::Card {
         state: card_state.status.parse().unwrap_or(crate::fsrs::State::New),
         difficulty: card_state.difficulty as f64,
@@ -156,8 +173,10 @@ pub async fn submit(
     };
 
     let new_card = fsrs.review(&current_card, rating, today);
+    tracing::info!(duration_ms = fsrs_start.elapsed().as_millis() as u64, "reviews::submit FSRS computation");
 
     // Update card state
+    let db_start = Instant::now();
     let new_status = format!("{:?}", new_card.state).to_lowercase();
     sqlx::query(
         r#"
@@ -176,8 +195,10 @@ pub async fn submit(
     .bind(card_state.id)
     .execute(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "reviews::submit update card_state");
 
     // Record review history
+    let db_start = Instant::now();
     let review_id = Uuid::new_v4();
     sqlx::query(
         r#"
@@ -196,6 +217,9 @@ pub async fn submit(
     .bind(new_card.stability as f32)
     .execute(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "reviews::submit insert review");
+
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "reviews::submit total");
 
     Ok(Json(ReviewResponse {
         id: review_id,

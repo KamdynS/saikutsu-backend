@@ -5,6 +5,7 @@ use axum::{
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::{
@@ -29,7 +30,10 @@ pub async fn list(
     Query(query): Query<ListCardsQuery>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<CardListResponse>> {
+    let start = Instant::now();
+
     // Verify deck ownership
+    let db_start = Instant::now();
     let deck_exists = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM decks WHERE id = $1 AND user_id = $2",
     )
@@ -37,6 +41,7 @@ pub async fn list(
     .bind(auth_user.user_id)
     .fetch_one(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::list ownership check");
 
     if deck_exists == 0 {
         return Err(AppError::NotFound("Deck not found".to_string()));
@@ -47,6 +52,7 @@ pub async fn list(
     let offset = (page - 1) * per_page;
 
     // Get cards and total count concurrently
+    let db_start = Instant::now();
     let (cards, total) = tokio::try_join!(
         sqlx::query_as::<_, Card>(
             "SELECT * FROM cards WHERE deck_id = $1 ORDER BY frequency_rank ASC NULLS LAST, created_at ASC LIMIT $2 OFFSET $3",
@@ -59,10 +65,12 @@ pub async fn list(
             .bind(deck_id)
             .fetch_one(&state.db),
     )?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, cards_fetched = cards.len(), "cards::list fetch cards+count");
 
     // Batch fetch card_states and sentences for all cards at once (avoids N+1)
     let card_ids: Vec<Uuid> = cards.iter().map(|c| c.id).collect();
 
+    let db_start = Instant::now();
     let (card_states, sentences) = tokio::try_join!(
         sqlx::query_as::<_, CardState>(
             "SELECT * FROM card_states WHERE card_id = ANY($1) AND user_id = $2",
@@ -76,6 +84,12 @@ pub async fn list(
         .bind(&card_ids)
         .fetch_all(&state.db),
     )?;
+    tracing::info!(
+        duration_ms = db_start.elapsed().as_millis() as u64,
+        states = card_states.len(),
+        sentences = sentences.len(),
+        "cards::list fetch states+sentences"
+    );
 
     // Index by card_id for O(1) lookups
     let mut states_by_card: HashMap<Uuid, CardState> = HashMap::with_capacity(card_states.len());
@@ -114,6 +128,8 @@ pub async fn list(
         })
         .collect();
 
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, total = total, page = page, "cards::list total");
+
     Ok(Json(CardListResponse {
         cards: card_responses,
         total,
@@ -128,7 +144,10 @@ pub async fn create(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<CreateCardRequest>,
 ) -> AppResult<Json<CardResponse>> {
+    let start = Instant::now();
+
     // Verify deck ownership and get language
+    let db_start = Instant::now();
     let deck_language = sqlx::query_scalar::<_, String>(
         "SELECT language FROM decks WHERE id = $1 AND user_id = $2",
     )
@@ -137,8 +156,10 @@ pub async fn create(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("Deck not found".to_string()))?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::create ownership check");
 
     // Create the card
+    let db_start = Instant::now();
     let card = sqlx::query_as::<_, Card>(
         r#"
         INSERT INTO cards (deck_id, lemma, definition, reading, part_of_speech)
@@ -153,8 +174,10 @@ pub async fn create(
     .bind(&req.part_of_speech)
     .fetch_one(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::create insert card");
 
     // Create card state for the user
+    let db_start = Instant::now();
     sqlx::query(
         "INSERT INTO card_states (user_id, card_id, status) VALUES ($1, $2, 'new')",
     )
@@ -162,14 +185,18 @@ pub async fn create(
     .bind(card.id)
     .execute(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::create insert card_state");
 
     // Add lemma to known_words
+    let db_start = Instant::now();
     let norm = normalize_lemma(&req.lemma, &deck_language);
     known_words_service::add_known_words(&state.db, auth_user.user_id, &deck_language, &[norm.as_str()]).await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::create add known_words");
 
     // If a sentence was provided, create it
     let sentences = if let Some(sentence_text) = &req.sentence {
         let cloze_text = sentence_text.replace(&req.lemma, "[...]");
+        let db_start = Instant::now();
         let sentence = sqlx::query_as::<_, Sentence>(
             r#"
             INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, is_primary)
@@ -183,10 +210,13 @@ pub async fn create(
         .bind(&req.lemma)
         .fetch_one(&state.db)
         .await?;
+        tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::create insert sentence");
         vec![sentence.into()]
     } else {
         vec![]
     };
+
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "cards::create total");
 
     Ok(Json(CardResponse {
         id: card.id,
@@ -209,7 +239,10 @@ pub async fn get(
     Path(id): Path<Uuid>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<CardResponse>> {
+    let start = Instant::now();
+
     // Single query with JOIN to verify ownership
+    let db_start = Instant::now();
     let card = sqlx::query_as::<_, Card>(
         "SELECT c.* FROM cards c JOIN decks d ON c.deck_id = d.id WHERE c.id = $1 AND d.user_id = $2",
     )
@@ -218,8 +251,10 @@ pub async fn get(
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("Card not found".to_string()))?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::get fetch card");
 
     // Fetch state and sentences concurrently
+    let db_start = Instant::now();
     let (state_result, sentences) = tokio::try_join!(
         sqlx::query_as::<_, CardState>(
             "SELECT * FROM card_states WHERE card_id = $1 AND user_id = $2",
@@ -233,6 +268,9 @@ pub async fn get(
         .bind(card.id)
         .fetch_all(&state.db),
     )?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::get fetch state+sentences");
+
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "cards::get total");
 
     Ok(Json(CardResponse {
         id: card.id,
@@ -256,7 +294,10 @@ pub async fn update(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<UpdateCardRequest>,
 ) -> AppResult<Json<CardResponse>> {
+    let start = Instant::now();
+
     // Get card with ownership check in one query
+    let db_start = Instant::now();
     let card = sqlx::query_as::<_, Card>(
         "SELECT c.* FROM cards c JOIN decks d ON c.deck_id = d.id WHERE c.id = $1 AND d.user_id = $2",
     )
@@ -265,11 +306,13 @@ pub async fn update(
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("Card not found".to_string()))?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::update ownership check");
 
     let notes = req.notes.or(card.notes);
     let tags = req.tags.unwrap_or(card.tags);
 
     // Update and fetch related data concurrently
+    let db_start = Instant::now();
     let updated_card = sqlx::query_as::<_, Card>(
         "UPDATE cards SET notes = $1, tags = $2, updated_at = NOW() WHERE id = $3 RETURNING *",
     )
@@ -278,7 +321,9 @@ pub async fn update(
     .bind(id)
     .fetch_one(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::update db update");
 
+    let db_start = Instant::now();
     let (state_result, sentences) = tokio::try_join!(
         sqlx::query_as::<_, CardState>(
             "SELECT * FROM card_states WHERE card_id = $1 AND user_id = $2",
@@ -292,6 +337,9 @@ pub async fn update(
         .bind(updated_card.id)
         .fetch_all(&state.db),
     )?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::update fetch state+sentences");
+
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "cards::update total");
 
     Ok(Json(CardResponse {
         id: updated_card.id,
@@ -314,7 +362,9 @@ pub async fn suspend(
     Path(id): Path<Uuid>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // Verify ownership and update in one query via subquery
+    let start = Instant::now();
+
+    let db_start = Instant::now();
     let result = sqlx::query(
         r#"
         UPDATE card_states SET suspended = true, suspended_at = NOW()
@@ -326,10 +376,13 @@ pub async fn suspend(
     .bind(auth_user.user_id)
     .execute(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::suspend db query");
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound("Card not found".to_string()));
     }
+
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "cards::suspend total");
 
     Ok(Json(serde_json::json!({ "message": "Card suspended" })))
 }
@@ -339,6 +392,9 @@ pub async fn reset(
     Path(id): Path<Uuid>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<serde_json::Value>> {
+    let start = Instant::now();
+
+    let db_start = Instant::now();
     let result = sqlx::query(
         r#"
         UPDATE card_states
@@ -352,10 +408,13 @@ pub async fn reset(
     .bind(auth_user.user_id)
     .execute(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::reset db query");
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound("Card not found".to_string()));
     }
+
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "cards::reset total");
 
     Ok(Json(serde_json::json!({ "message": "Card reset" })))
 }

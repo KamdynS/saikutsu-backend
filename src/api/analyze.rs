@@ -5,6 +5,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::{
     api::middleware::AuthUser,
@@ -173,12 +174,17 @@ fn analyze_text_core(
     full_text: &str,
     language: &str,
 ) -> Result<(Vec<Token>, Vec<String>, HashMap<String, Vec<String>>, HashMap<String, String>, HashMap<String, Vec<String>>, HashMap<String, HashSet<String>>), AppError> {
+    let step_start = Instant::now();
     let sentences = split_sentences(full_text, language);
+    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, sentences = sentences.len(), "analyze_text_core split_sentences");
 
     // Tokenize full text only ONCE (was previously tokenized again per-sentence)
+    let step_start = Instant::now();
     let all_tokens = tokenize_text(full_text, language)?;
+    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, tokens = all_tokens.len(), "analyze_text_core tokenize full text");
 
     // Build surface form and POS mappings (normalized lemma keys)
+    let step_start = Instant::now();
     let mut surface_forms: HashMap<String, Vec<String>> = HashMap::new();
     let mut pos_map: HashMap<String, String> = HashMap::new();
 
@@ -197,9 +203,11 @@ fn analyze_text_core(
         forms.sort();
         forms.dedup();
     }
+    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, "analyze_text_core build surface/pos maps");
 
     // Build lemma → sentences and sentence → content lemmas mappings
     // using per-sentence tokenization for accurate matching (no false positives from substring matching)
+    let step_start = Instant::now();
     let mut lemma_sentences: HashMap<String, Vec<String>> = HashMap::new();
     let mut sentence_content_lemmas: HashMap<String, HashSet<String>> = HashMap::new();
 
@@ -216,6 +224,7 @@ fn analyze_text_core(
         }
         sentence_content_lemmas.insert(sentence.clone(), seen);
     }
+    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, sentences_tokenized = sentences.len(), "analyze_text_core per-sentence tokenization");
 
     // Limit sentences per word
     for sents in lemma_sentences.values_mut() {
@@ -238,8 +247,11 @@ fn build_word_list(
     lemma_sentences: &HashMap<String, Vec<String>>,
     language: &str,
 ) -> Vec<WordInfo> {
+    let step_start = Instant::now();
     let freq_map = frequency::count_lemmas(all_tokens, language);
+    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, "build_word_list count_lemmas");
 
+    let step_start = Instant::now();
     let mut words: Vec<WordInfo> = freq_map
         .into_iter()
         .map(|(lemma, wf)| {
@@ -268,14 +280,19 @@ fn build_word_list(
         .collect();
 
     words.sort_by(|a, b| b.count.cmp(&a.count));
+    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, unique_words = words.len(), "build_word_list dictionary lookups + sort");
+
     words
 }
 
 pub async fn analyze_pdf(mut multipart: Multipart) -> AppResult<Json<AnalysisResult>> {
+    let start = Instant::now();
+
     let mut filename: Option<String> = None;
     let mut pdf_bytes: Option<Vec<u8>> = None;
     let mut language_hint: Option<String> = None;
 
+    let upload_start = Instant::now();
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().map(|s| s.to_string());
         let file_name = field.file_name().map(|s| s.to_string());
@@ -295,6 +312,7 @@ pub async fn analyze_pdf(mut multipart: Multipart) -> AppResult<Json<AnalysisRes
             _ => {}
         }
     }
+    tracing::info!(duration_ms = upload_start.elapsed().as_millis() as u64, "analyze::analyze_pdf read upload");
 
     let filename = filename.ok_or_else(|| AppError::BadRequest("No file provided".to_string()))?;
     let pdf_bytes = pdf_bytes.ok_or_else(|| AppError::BadRequest("No file data".to_string()))?;
@@ -303,22 +321,38 @@ pub async fn analyze_pdf(mut multipart: Multipart) -> AppResult<Json<AnalysisRes
         return Err(AppError::BadRequest("Only PDF files are supported".to_string()));
     }
 
+    let extract_start = Instant::now();
     let pages = pdf::extract_text_from_bytes(&pdf_bytes)
         .map_err(|e| AppError::BadRequest(format!("Failed to extract text: {}", e)))?;
+    tracing::info!(duration_ms = extract_start.elapsed().as_millis() as u64, pages = pages.len(), "analyze::analyze_pdf PDF extraction");
 
     let full_text: String = pages.iter().map(|p| p.text.clone()).collect::<Vec<_>>().join("\n");
     let language = detect_language(&full_text, language_hint.as_deref());
     let text_length = full_text.len();
     let sample_text: String = full_text.chars().take(500).collect();
 
+    let core_start = Instant::now();
     let (all_tokens, sentences, surface_forms, pos_map, lemma_sentences, _sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
+    tracing::info!(duration_ms = core_start.elapsed().as_millis() as u64, "analyze::analyze_pdf analyze_text_core total");
 
     let total_tokens = all_tokens.len();
     let content_token_count = all_tokens.iter().filter(|t| t.is_content).count();
+
+    let word_list_start = Instant::now();
     let words = build_word_list(&all_tokens, &surface_forms, &pos_map, &lemma_sentences, &language);
+    tracing::info!(duration_ms = word_list_start.elapsed().as_millis() as u64, "analyze::analyze_pdf build_word_list total");
+
     let unique_words = words.len();
     let sentence_count = sentences.len();
+
+    tracing::info!(
+        duration_ms = start.elapsed().as_millis() as u64,
+        text_length = text_length,
+        tokens = total_tokens,
+        unique_words = unique_words,
+        "analyze::analyze_pdf total"
+    );
 
     Ok(Json(AnalysisResult {
         filename,
@@ -336,6 +370,8 @@ pub async fn analyze_pdf(mut multipart: Multipart) -> AppResult<Json<AnalysisRes
 pub async fn analyze_text(
     Json(req): Json<AnalyzeTextRequest>,
 ) -> AppResult<Json<AnalysisResult>> {
+    let start = Instant::now();
+
     let full_text = req.text;
     let title = req.title.unwrap_or_else(|| "Pasted Text".to_string());
 
@@ -347,14 +383,28 @@ pub async fn analyze_text(
     let text_length = full_text.len();
     let sample_text: String = full_text.chars().take(500).collect();
 
+    let core_start = Instant::now();
     let (all_tokens, sentences, surface_forms, pos_map, lemma_sentences, _sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
+    tracing::info!(duration_ms = core_start.elapsed().as_millis() as u64, "analyze::analyze_text analyze_text_core total");
 
     let total_tokens = all_tokens.len();
     let content_token_count = all_tokens.iter().filter(|t| t.is_content).count();
+
+    let word_list_start = Instant::now();
     let words = build_word_list(&all_tokens, &surface_forms, &pos_map, &lemma_sentences, &language);
+    tracing::info!(duration_ms = word_list_start.elapsed().as_millis() as u64, "analyze::analyze_text build_word_list total");
+
     let unique_words = words.len();
     let sentence_count = sentences.len();
+
+    tracing::info!(
+        duration_ms = start.elapsed().as_millis() as u64,
+        text_length = text_length,
+        tokens = total_tokens,
+        unique_words = unique_words,
+        "analyze::analyze_text total"
+    );
 
     Ok(Json(AnalysisResult {
         filename: title,
@@ -395,6 +445,8 @@ pub async fn create_deck_from_text(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<CreateDeckFromTextRequest>,
 ) -> AppResult<Json<CreateDeckResult>> {
+    let start = Instant::now();
+
     let full_text = req.text;
     let deck_name = req.name;
     let deck_types = if req.deck_types.is_empty() {
@@ -409,9 +461,12 @@ pub async fn create_deck_from_text(
 
     let language = detect_language(&full_text, req.language.as_deref());
 
+    let core_start = Instant::now();
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
+    tracing::info!(duration_ms = core_start.elapsed().as_millis() as u64, "analyze::create_deck_from_text analyze_text_core");
 
+    let freq_start = Instant::now();
     let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
     let mut words: Vec<(String, i32)> = freq_map
@@ -419,6 +474,7 @@ pub async fn create_deck_from_text(
         .map(|(lemma, wf)| (lemma.clone(), wf.doc_count))
         .collect();
     words.sort_by(|a, b| b.1.cmp(&a.1));
+    tracing::info!(duration_ms = freq_start.elapsed().as_millis() as u64, words = words.len(), "analyze::create_deck_from_text frequency counting");
 
     let study_mode = if deck_types.contains(&DeckType::IPlusOne) || deck_types.contains(&DeckType::WordDefinition) && deck_types.contains(&DeckType::IPlusOne) {
         "cloze"
@@ -432,6 +488,7 @@ pub async fn create_deck_from_text(
     });
 
     // Create the deck with detected language
+    let db_start = Instant::now();
     let deck = sqlx::query_as::<_, Deck>(
         r#"
         INSERT INTO decks (user_id, name, description, language, source_type, settings)
@@ -446,17 +503,22 @@ pub async fn create_deck_from_text(
     .bind(&settings)
     .fetch_one(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "analyze::create_deck_from_text create deck");
 
+    let cards_start = Instant::now();
     let result = create_cards_from_analysis(
         &state, &auth_user, &deck, &words,
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
         &sentence_content_lemmas, &language,
     ).await?;
+    tracing::info!(duration_ms = cards_start.elapsed().as_millis() as u64, "analyze::create_deck_from_text create_cards_from_analysis");
 
     tracing::info!(
-        "Created deck '{}' ({}) with {} cards and {} sentences ({} i+1, {} skipped)",
-        deck_name, language, result.cards_created, result.sentences_created,
-        result.i_plus_one_found, result.words_skipped_duplicate
+        duration_ms = start.elapsed().as_millis() as u64,
+        cards = result.cards_created,
+        sentences = result.sentences_created,
+        skipped = result.words_skipped_duplicate,
+        "analyze::create_deck_from_text total"
     );
 
     Ok(Json(CreateDeckResult {
@@ -474,12 +536,15 @@ pub async fn create_deck_from_pdf(
     Extension(auth_user): Extension<AuthUser>,
     mut multipart: Multipart,
 ) -> AppResult<Json<CreateDeckResult>> {
+    let start = Instant::now();
+
     let mut filename: Option<String> = None;
     let mut pdf_bytes: Option<Vec<u8>> = None;
     let mut deck_name: Option<String> = None;
     let mut deck_types: Vec<DeckType> = Vec::new();
     let mut language_hint: Option<String> = None;
 
+    let upload_start = Instant::now();
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().map(|s| s.to_string());
         let file_name = field.file_name().map(|s| s.to_string());
@@ -518,6 +583,7 @@ pub async fn create_deck_from_pdf(
             _ => {}
         }
     }
+    tracing::info!(duration_ms = upload_start.elapsed().as_millis() as u64, "analyze::create_deck_from_pdf read upload");
 
     if deck_types.is_empty() {
         deck_types = vec![DeckType::WordDefinition];
@@ -531,15 +597,20 @@ pub async fn create_deck_from_pdf(
         return Err(AppError::BadRequest("Only PDF files are supported".to_string()));
     }
 
+    let extract_start = Instant::now();
     let pages = pdf::extract_text_from_bytes(&pdf_bytes)
         .map_err(|e| AppError::BadRequest(format!("Failed to extract text: {}", e)))?;
+    tracing::info!(duration_ms = extract_start.elapsed().as_millis() as u64, pages = pages.len(), "analyze::create_deck_from_pdf PDF extraction");
 
     let full_text: String = pages.iter().map(|p| p.text.clone()).collect::<Vec<_>>().join("\n");
     let language = detect_language(&full_text, language_hint.as_deref());
 
+    let core_start = Instant::now();
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
+    tracing::info!(duration_ms = core_start.elapsed().as_millis() as u64, "analyze::create_deck_from_pdf analyze_text_core");
 
+    let freq_start = Instant::now();
     let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
     let mut words: Vec<(String, i32)> = freq_map
@@ -547,6 +618,7 @@ pub async fn create_deck_from_pdf(
         .map(|(lemma, wf)| (lemma.clone(), wf.doc_count))
         .collect();
     words.sort_by(|a, b| b.1.cmp(&a.1));
+    tracing::info!(duration_ms = freq_start.elapsed().as_millis() as u64, words = words.len(), "analyze::create_deck_from_pdf frequency counting");
 
     let study_mode = if deck_types.contains(&DeckType::IPlusOne) {
         "cloze"
@@ -559,6 +631,7 @@ pub async fn create_deck_from_pdf(
         "study_mode": study_mode
     });
 
+    let db_start = Instant::now();
     let deck = sqlx::query_as::<_, Deck>(
         r#"
         INSERT INTO decks (user_id, name, description, language, source_type, settings)
@@ -573,17 +646,22 @@ pub async fn create_deck_from_pdf(
     .bind(&settings)
     .fetch_one(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "analyze::create_deck_from_pdf create deck");
 
+    let cards_start = Instant::now();
     let result = create_cards_from_analysis(
         &state, &auth_user, &deck, &words,
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
         &sentence_content_lemmas, &language,
     ).await?;
+    tracing::info!(duration_ms = cards_start.elapsed().as_millis() as u64, "analyze::create_deck_from_pdf create_cards_from_analysis");
 
     tracing::info!(
-        "Created deck '{}' ({}) with {} cards and {} sentences ({} i+1, {} skipped)",
-        deck_name, language, result.cards_created, result.sentences_created,
-        result.i_plus_one_found, result.words_skipped_duplicate
+        duration_ms = start.elapsed().as_millis() as u64,
+        cards = result.cards_created,
+        sentences = result.sentences_created,
+        skipped = result.words_skipped_duplicate,
+        "analyze::create_deck_from_pdf total"
     );
 
     Ok(Json(CreateDeckResult {
@@ -601,6 +679,8 @@ pub async fn create_deck_from_media(
     Extension(auth_user): Extension<AuthUser>,
     mut multipart: Multipart,
 ) -> AppResult<Json<CreateDeckResult>> {
+    let start = Instant::now();
+
     let api_key = state.config.openai_api_key.as_deref().ok_or_else(|| {
         AppError::BadRequest("OPENAI_API_KEY is not configured. Media transcription requires an OpenAI API key.".to_string())
     })?;
@@ -611,6 +691,7 @@ pub async fn create_deck_from_media(
     let mut deck_types: Vec<DeckType> = Vec::new();
     let mut language_hint: Option<String> = None;
 
+    let upload_start = Instant::now();
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().map(|s| s.to_string());
         let file_name = field.file_name().map(|s| s.to_string());
@@ -649,6 +730,7 @@ pub async fn create_deck_from_media(
             _ => {}
         }
     }
+    tracing::info!(duration_ms = upload_start.elapsed().as_millis() as u64, "analyze::create_deck_from_media read upload");
 
     if deck_types.is_empty() {
         deck_types = vec![DeckType::WordDefinition];
@@ -674,6 +756,7 @@ pub async fn create_deck_from_media(
 
     tracing::info!("Transcribing {} file: {}", source_type, filename);
 
+    let transcribe_start = Instant::now();
     let (transcript, duration) = transcription::transcribe_media(
         &file_bytes,
         &filename,
@@ -682,11 +765,11 @@ pub async fn create_deck_from_media(
     )
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Transcription failed: {}", e)))?;
-
     tracing::info!(
-        "Transcription complete: {:.0}s duration, {} chars",
-        duration,
-        transcript.len()
+        duration_ms = transcribe_start.elapsed().as_millis() as u64,
+        media_duration_s = duration as u64,
+        transcript_chars = transcript.len(),
+        "analyze::create_deck_from_media transcription"
     );
 
     if transcript.trim().is_empty() {
@@ -695,9 +778,12 @@ pub async fn create_deck_from_media(
 
     let language = detect_language(&transcript, language_hint.as_deref());
 
+    let core_start = Instant::now();
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&transcript, &language)?;
+    tracing::info!(duration_ms = core_start.elapsed().as_millis() as u64, "analyze::create_deck_from_media analyze_text_core");
 
+    let freq_start = Instant::now();
     let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
     let mut words: Vec<(String, i32)> = freq_map
@@ -705,6 +791,7 @@ pub async fn create_deck_from_media(
         .map(|(lemma, wf)| (lemma.clone(), wf.doc_count))
         .collect();
     words.sort_by(|a, b| b.1.cmp(&a.1));
+    tracing::info!(duration_ms = freq_start.elapsed().as_millis() as u64, words = words.len(), "analyze::create_deck_from_media frequency counting");
 
     let study_mode = if deck_types.contains(&DeckType::IPlusOne) {
         "cloze"
@@ -717,6 +804,7 @@ pub async fn create_deck_from_media(
         "study_mode": study_mode
     });
 
+    let db_start = Instant::now();
     let deck = sqlx::query_as::<_, Deck>(
         r#"
         INSERT INTO decks (user_id, name, description, language, source_type, settings)
@@ -737,17 +825,22 @@ pub async fn create_deck_from_media(
     .bind(&settings)
     .fetch_one(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "analyze::create_deck_from_media create deck");
 
+    let cards_start = Instant::now();
     let result = create_cards_from_analysis(
         &state, &auth_user, &deck, &words,
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
         &sentence_content_lemmas, &language,
     ).await?;
+    tracing::info!(duration_ms = cards_start.elapsed().as_millis() as u64, "analyze::create_deck_from_media create_cards_from_analysis");
 
     tracing::info!(
-        "Created deck '{}' ({}) from {} with {} cards and {} sentences ({} i+1, {} skipped)",
-        deck_name, language, source_type, result.cards_created, result.sentences_created,
-        result.i_plus_one_found, result.words_skipped_duplicate
+        duration_ms = start.elapsed().as_millis() as u64,
+        cards = result.cards_created,
+        sentences = result.sentences_created,
+        skipped = result.words_skipped_duplicate,
+        "analyze::create_deck_from_media total"
     );
 
     Ok(Json(CreateDeckResult {
@@ -781,8 +874,12 @@ async fn create_cards_from_analysis(
     sentence_content_lemmas: &HashMap<String, HashSet<String>>,
     language: &str,
 ) -> AppResult<CardCreationResult> {
+    let start = Instant::now();
+
     // Query existing known lemmas for this user+language (language-scoped dedup)
+    let db_start = Instant::now();
     let existing_lemmas = known_words_service::get_known_lemmas(&state.db, auth_user.user_id, language).await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, known = existing_lemmas.len(), "create_cards_from_analysis get_known_lemmas");
 
     let want_word_def = deck_types.contains(&DeckType::WordDefinition);
     let want_i_plus_one = deck_types.contains(&DeckType::IPlusOne);
@@ -792,6 +889,7 @@ async fn create_cards_from_analysis(
     let mut i_plus_one_found: usize = 0;
 
     if want_i_plus_one {
+        let i1_start = Instant::now();
         let new_lemmas: HashSet<&str> = words.iter()
             .map(|(lemma, _)| lemma.as_str())
             .filter(|l| !existing_lemmas.contains(*l))
@@ -826,6 +924,7 @@ async fn create_cards_from_analysis(
                 }
             }
         }
+        tracing::info!(duration_ms = i1_start.elapsed().as_millis() as u64, i_plus_one_found = i_plus_one_found, "create_cards_from_analysis i+1 analysis");
     }
 
     // Pre-compute all card data before batch insert
@@ -838,6 +937,7 @@ async fn create_cards_from_analysis(
         doc_frequency: i32,
     }
 
+    let dict_start = Instant::now();
     let mut card_data_list: Vec<CardData> = Vec::new();
     let mut words_skipped_duplicate = 0;
 
@@ -874,6 +974,12 @@ async fn create_cards_from_analysis(
             doc_frequency: *count,
         });
     }
+    tracing::info!(
+        duration_ms = dict_start.elapsed().as_millis() as u64,
+        cards_to_create = card_data_list.len(),
+        skipped = words_skipped_duplicate,
+        "create_cards_from_analysis dictionary lookups + card data prep"
+    );
 
     if card_data_list.is_empty() {
         return Ok(CardCreationResult {
@@ -885,6 +991,7 @@ async fn create_cards_from_analysis(
     }
 
     // Batch INSERT all cards using unnest
+    let db_start = Instant::now();
     let lemmas: Vec<&str> = card_data_list.iter().map(|c| c.lemma.as_str()).collect();
     let readings: Vec<Option<&str>> = card_data_list.iter().map(|c| c.reading.as_deref()).collect();
     let definitions: Vec<&str> = card_data_list.iter().map(|c| c.definition.as_str()).collect();
@@ -908,14 +1015,18 @@ async fn create_cards_from_analysis(
     .bind(&doc_freqs)
     .fetch_all(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, cards = card_ids.len(), "create_cards_from_analysis batch insert cards");
 
     let cards_created = card_ids.len();
 
     // Add newly created lemmas to known_words
+    let db_start = Instant::now();
     let new_lemmas: Vec<&str> = card_data_list.iter().map(|c| c.lemma.as_str()).collect();
     known_words_service::add_known_words(&state.db, auth_user.user_id, language, &new_lemmas).await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "create_cards_from_analysis add known_words");
 
     // Batch INSERT all card_states
+    let db_start = Instant::now();
     sqlx::query(
         r#"
         INSERT INTO card_states (user_id, card_id, status)
@@ -926,6 +1037,7 @@ async fn create_cards_from_analysis(
     .bind(&card_ids)
     .execute(&state.db)
     .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "create_cards_from_analysis batch insert card_states");
 
     // Build lemma → card_id map for sentence attachment
     let lemma_to_card_id: HashMap<&str, uuid::Uuid> = card_data_list.iter()
@@ -934,6 +1046,7 @@ async fn create_cards_from_analysis(
         .collect();
 
     // Collect all sentences for batch insert
+    let sent_start = Instant::now();
     let mut sent_card_ids: Vec<uuid::Uuid> = Vec::new();
     let mut sent_texts: Vec<String> = Vec::new();
     let mut sent_cloze_texts: Vec<String> = Vec::new();
@@ -1004,9 +1117,11 @@ async fn create_cards_from_analysis(
     }
 
     let sentences_created = sent_card_ids.len();
+    tracing::info!(duration_ms = sent_start.elapsed().as_millis() as u64, sentences = sentences_created, "create_cards_from_analysis prepare sentences");
 
     // Batch INSERT all sentences
     if !sent_card_ids.is_empty() {
+        let db_start = Instant::now();
         sqlx::query(
             r#"
             INSERT INTO sentences (card_id, text, cloze_text, cloze_answer, is_primary)
@@ -1020,7 +1135,10 @@ async fn create_cards_from_analysis(
         .bind(&sent_is_primary)
         .execute(&state.db)
         .await?;
+        tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, sentences = sentences_created, "create_cards_from_analysis batch insert sentences");
     }
+
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "create_cards_from_analysis total");
 
     Ok(CardCreationResult {
         cards_created,

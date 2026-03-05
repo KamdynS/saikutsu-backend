@@ -8,6 +8,7 @@ use axum::{
 use rusqlite::Connection;
 use std::io::{Cursor, Write};
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
@@ -24,22 +25,29 @@ pub async fn export_apkg(
     Extension(auth_user): Extension<AuthUser>,
     Path(deck_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
+    let start = Instant::now();
+
     // Verify deck ownership
+    let db_start = Instant::now();
     let deck = sqlx::query_as::<_, Deck>("SELECT * FROM decks WHERE id = $1 AND user_id = $2")
         .bind(deck_id)
         .bind(auth_user.user_id)
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("Deck not found".to_string()))?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "exports::export_apkg fetch deck");
 
     // Fetch all cards for this deck
+    let db_start = Instant::now();
     let cards = sqlx::query_as::<_, Card>("SELECT * FROM cards WHERE deck_id = $1 ORDER BY frequency_rank ASC NULLS LAST, created_at ASC")
         .bind(deck_id)
         .fetch_all(&state.db)
         .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, cards = cards.len(), "exports::export_apkg fetch cards");
 
     // Fetch all sentences for these cards
     let card_ids: Vec<Uuid> = cards.iter().map(|c| c.id).collect();
+    let db_start = Instant::now();
     let sentences = if card_ids.is_empty() {
         vec![]
     } else {
@@ -50,12 +58,17 @@ pub async fn export_apkg(
         .fetch_all(&state.db)
         .await?
     };
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, sentences = sentences.len(), "exports::export_apkg fetch sentences");
 
     // Build the .apkg in memory
+    let build_start = Instant::now();
     let apkg_bytes = build_apkg(&deck, &cards, &sentences)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to build .apkg: {}", e)))?;
+    tracing::info!(duration_ms = build_start.elapsed().as_millis() as u64, bytes = apkg_bytes.len(), "exports::export_apkg build apkg");
 
     let filename = format!("{}.apkg", sanitize_filename(&deck.name));
+
+    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "exports::export_apkg total");
 
     Ok(Response::builder()
         .status(StatusCode::OK)
