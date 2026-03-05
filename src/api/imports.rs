@@ -146,7 +146,7 @@ pub async fn import_apkg(
     tracing::info!(duration_ms = start.elapsed().as_millis() as u64, cards = cards_created, "imports::import_apkg total");
 
     Ok(Json(CreateDeckResult {
-        deck: DeckResponse::from(deck),
+        decks: vec![DeckResponse::from(deck)],
         cards_created,
         sentences_created: 0,
         i_plus_one_found: 0,
