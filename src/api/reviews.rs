@@ -1,5 +1,6 @@
-use axum::{extract::State, Extension, Json};
+use axum::{extract::{Query, State}, Extension, Json};
 use chrono::{NaiveDate, Utc};
+use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -15,14 +16,21 @@ use crate::{
     AppState,
 };
 
+#[derive(Debug, Deserialize)]
+pub struct ReviewQueueQuery {
+    pub deck_id: Option<Uuid>,
+}
+
 pub async fn get_queue(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ReviewQueueQuery>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<ReviewQueueResponse>> {
     let start = Instant::now();
     let today = Utc::now().date_naive();
 
     // Run queue fetch and counts concurrently
+    // When deck_id is provided, filter to that deck only
     let db_start = Instant::now();
     let (items, counts) = tokio::try_join!(
         sqlx::query_as::<_, ReviewQueueRow>(
@@ -47,6 +55,7 @@ pub async fn get_queue(
                 LEFT JOIN sentences s ON s.card_id = c.id AND s.is_primary = true
                 WHERE cs.user_id = $1
                   AND cs.suspended = false
+                  AND ($3::uuid IS NULL OR c.deck_id = $3)
                   AND (
                     cs.status = 'new'
                     OR (cs.due_date <= $2 AND cs.status IN ('learning', 'review', 'relearning'))
@@ -75,6 +84,7 @@ pub async fn get_queue(
         )
         .bind(auth_user.user_id)
         .bind(today)
+        .bind(query.deck_id)
         .fetch_all(&state.db),
         sqlx::query_as::<_, ReviewCounts>(
             r#"
@@ -82,12 +92,16 @@ pub async fn get_queue(
                 COUNT(*) FILTER (WHERE status = 'new' AND NOT suspended) as total_new,
                 COUNT(*) FILTER (WHERE status = 'learning' AND NOT suspended) as total_learning,
                 COUNT(*) FILTER (WHERE due_date <= $2 AND status IN ('review', 'relearning') AND NOT suspended) as total_due
-            FROM card_states
+            FROM card_states cs
             WHERE user_id = $1
+              AND ($3::uuid IS NULL OR EXISTS (
+                SELECT 1 FROM cards c WHERE c.id = cs.card_id AND c.deck_id = $3
+              ))
             "#,
         )
         .bind(auth_user.user_id)
         .bind(today)
+        .bind(query.deck_id)
         .fetch_one(&state.db),
     )?;
     tracing::info!(
