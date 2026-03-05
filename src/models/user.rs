@@ -18,6 +18,7 @@ pub struct User {
     pub monthly_reset_at: DateTime<Utc>,
     pub email_verified: bool,
     pub email_verified_at: Option<DateTime<Utc>>,
+    pub is_beta_tester: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -28,6 +29,7 @@ pub struct UserResponse {
     pub email: String,
     pub tier: String,
     pub email_verified: bool,
+    pub is_beta_tester: bool,
     pub daily_reviews_used: i32,
     pub monthly_uploads_used: i32,
     pub monthly_exports_used: i32,
@@ -41,6 +43,7 @@ impl From<User> for UserResponse {
             email: user.email,
             tier: user.tier,
             email_verified: user.email_verified,
+            is_beta_tester: user.is_beta_tester,
             daily_reviews_used: user.daily_reviews_used,
             monthly_uploads_used: user.monthly_uploads_used,
             monthly_exports_used: user.monthly_exports_used,

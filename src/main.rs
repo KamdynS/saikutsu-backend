@@ -102,7 +102,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_check))
         // Analysis endpoints (stateless, no user data)
         .route("/v1/analyze", post(api::analyze::analyze_pdf))
-        .route("/v1/analyze/text", post(api::analyze::analyze_text));
+        .route("/v1/analyze/text", post(api::analyze::analyze_text))
+        // Waitlist (public, no auth)
+        .route("/v1/waitlist", post(api::waitlist::join_waitlist));
 
     let app = Router::new()
         .merge(public)
