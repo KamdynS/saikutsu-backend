@@ -500,7 +500,7 @@ pub async fn create_deck_from_text(
         )
         .bind(auth_user.user_id)
         .bind(&name)
-        .bind(format!("{} words from pasted text", words.len()))
+        .bind("from pasted text")
         .bind(&language)
         .bind(&settings)
         .fetch_one(&state.db)
@@ -525,7 +525,7 @@ pub async fn create_deck_from_text(
         )
         .bind(auth_user.user_id)
         .bind(&name)
-        .bind(format!("{} words from pasted text", words.len()))
+        .bind("from pasted text")
         .bind(&language)
         .bind(&settings)
         .fetch_one(&state.db)
@@ -546,6 +546,16 @@ pub async fn create_deck_from_text(
     ).await?;
     tracing::info!(duration_ms = cards_start.elapsed().as_millis() as u64, "analyze::create_deck_from_text create_cards_from_analysis");
 
+    // Update descriptions with actual card counts (post-dedup)
+    let skipped = result.words_skipped_duplicate;
+    let new_words = result.cards_created;
+    let desc = if skipped > 0 {
+        format!("{} new words from pasted text ({} already known)", new_words, skipped)
+    } else {
+        format!("{} words from pasted text", new_words)
+    };
+    let updated_decks = update_deck_descriptions(&state.db, &created_decks, &desc).await?;
+
     tracing::info!(
         duration_ms = start.elapsed().as_millis() as u64,
         cards = result.cards_created,
@@ -555,7 +565,7 @@ pub async fn create_deck_from_text(
     );
 
     Ok(Json(CreateDeckResult {
-        decks: created_decks.into_iter().map(|d| d.into()).collect(),
+        decks: updated_decks.into_iter().map(|d| d.into()).collect(),
         cards_created: result.cards_created,
         sentences_created: result.sentences_created,
         i_plus_one_found: result.i_plus_one_found,
@@ -676,7 +686,7 @@ pub async fn create_deck_from_pdf(
         )
         .bind(auth_user.user_id)
         .bind(&name)
-        .bind(format!("Generated from {} - {} words", filename, words.len()))
+        .bind(format!("from {}", filename))
         .bind(&language)
         .bind(&settings)
         .fetch_one(&state.db)
@@ -701,7 +711,7 @@ pub async fn create_deck_from_pdf(
         )
         .bind(auth_user.user_id)
         .bind(&name)
-        .bind(format!("Generated from {} - {} words", filename, words.len()))
+        .bind(format!("from {}", filename))
         .bind(&language)
         .bind(&settings)
         .fetch_one(&state.db)
@@ -722,6 +732,16 @@ pub async fn create_deck_from_pdf(
     ).await?;
     tracing::info!(duration_ms = cards_start.elapsed().as_millis() as u64, "analyze::create_deck_from_pdf create_cards_from_analysis");
 
+    // Update descriptions with actual card counts (post-dedup)
+    let skipped = result.words_skipped_duplicate;
+    let new_words = result.cards_created;
+    let desc = if skipped > 0 {
+        format!("{} new words from {} ({} already known)", new_words, filename, skipped)
+    } else {
+        format!("{} words from {}", new_words, filename)
+    };
+    let updated_decks = update_deck_descriptions(&state.db, &created_decks, &desc).await?;
+
     tracing::info!(
         duration_ms = start.elapsed().as_millis() as u64,
         cards = result.cards_created,
@@ -731,7 +751,7 @@ pub async fn create_deck_from_pdf(
     );
 
     Ok(Json(CreateDeckResult {
-        decks: created_decks.into_iter().map(|d| d.into()).collect(),
+        decks: updated_decks.into_iter().map(|d| d.into()).collect(),
         cards_created: result.cards_created,
         sentences_created: result.sentences_created,
         i_plus_one_found: result.i_plus_one_found,
@@ -860,10 +880,7 @@ pub async fn create_deck_from_media(
     tracing::info!(duration_ms = freq_start.elapsed().as_millis() as u64, words = words.len(), "analyze::create_deck_from_media frequency counting");
 
     let both_types = deck_types.contains(&DeckType::IPlusOne) && deck_types.contains(&DeckType::WordDefinition);
-    let description = format!(
-        "Transcribed from {} ({:.0}s) - {} words",
-        filename, duration, words.len()
-    );
+    let placeholder_desc = format!("from {} ({:.0}s)", filename, duration);
 
     let db_start = Instant::now();
     let mut created_decks: Vec<Deck> = Vec::new();
@@ -886,7 +903,7 @@ pub async fn create_deck_from_media(
         )
         .bind(auth_user.user_id)
         .bind(&name)
-        .bind(&description)
+        .bind(&placeholder_desc)
         .bind(&language)
         .bind(source_type)
         .bind(&settings)
@@ -912,7 +929,7 @@ pub async fn create_deck_from_media(
         )
         .bind(auth_user.user_id)
         .bind(&name)
-        .bind(&description)
+        .bind(&placeholder_desc)
         .bind(&language)
         .bind(source_type)
         .bind(&settings)
@@ -934,6 +951,16 @@ pub async fn create_deck_from_media(
     ).await?;
     tracing::info!(duration_ms = cards_start.elapsed().as_millis() as u64, "analyze::create_deck_from_media create_cards_from_analysis");
 
+    // Update descriptions with actual card counts (post-dedup)
+    let skipped = result.words_skipped_duplicate;
+    let new_words = result.cards_created;
+    let desc = if skipped > 0 {
+        format!("{} new words from {} ({} already known)", new_words, filename, skipped)
+    } else {
+        format!("{} words from {}", new_words, filename)
+    };
+    let updated_decks = update_deck_descriptions(&state.db, &created_decks, &desc).await?;
+
     tracing::info!(
         duration_ms = start.elapsed().as_millis() as u64,
         cards = result.cards_created,
@@ -943,12 +970,32 @@ pub async fn create_deck_from_media(
     );
 
     Ok(Json(CreateDeckResult {
-        decks: created_decks.into_iter().map(|d| d.into()).collect(),
+        decks: updated_decks.into_iter().map(|d| d.into()).collect(),
         cards_created: result.cards_created,
         sentences_created: result.sentences_created,
         i_plus_one_found: result.i_plus_one_found,
         words_skipped_duplicate: result.words_skipped_duplicate,
     }))
+}
+
+/// Update deck descriptions and return refreshed deck data (with correct card_count from triggers).
+async fn update_deck_descriptions(
+    db: &sqlx::PgPool,
+    decks: &[Deck],
+    description: &str,
+) -> AppResult<Vec<Deck>> {
+    let mut updated = Vec::with_capacity(decks.len());
+    for deck in decks {
+        let d = sqlx::query_as::<_, Deck>(
+            "UPDATE decks SET description = $1 WHERE id = $2 RETURNING *",
+        )
+        .bind(description)
+        .bind(deck.id)
+        .fetch_one(db)
+        .await?;
+        updated.push(d);
+    }
+    Ok(updated)
 }
 
 struct CardCreationResult {
