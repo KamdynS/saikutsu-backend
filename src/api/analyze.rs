@@ -1028,7 +1028,16 @@ async fn create_cards_from_analysis(
     // Query existing known lemmas for this user+language (language-scoped dedup)
     let db_start = Instant::now();
     let existing_lemmas = known_words_service::get_known_lemmas(&state.db, auth_user.user_id, language).await?;
-    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, known = existing_lemmas.len(), "create_cards_from_analysis get_known_lemmas");
+    tracing::info!(
+        duration_ms = db_start.elapsed().as_millis() as u64,
+        known_count = existing_lemmas.len(),
+        user_id = %auth_user.user_id,
+        language = language,
+        "dedup: fetched known_words for user"
+    );
+    // Log a sample of known lemmas so we can verify normalization
+    let sample_known: Vec<&str> = existing_lemmas.iter().take(20).map(|s| s.as_str()).collect();
+    tracing::info!(sample = ?sample_known, "dedup: sample of existing known lemmas");
 
     let want_word_def = deck_types.contains(&DeckType::WordDefinition);
     let want_i_plus_one = deck_types.contains(&DeckType::IPlusOne);
@@ -1043,11 +1052,34 @@ async fn create_cards_from_analysis(
             .map(|(lemma, _)| lemma.as_str())
             .filter(|l| !existing_lemmas.contains(*l))
             .collect();
+        tracing::info!(
+            total_words_in_text = words.len(),
+            new_lemmas_count = new_lemmas.len(),
+            filtered_by_known = words.len() - new_lemmas.len(),
+            "dedup: i+1 new_lemmas built (words in text minus known)"
+        );
+        let sample_new: Vec<&&str> = new_lemmas.iter().take(15).collect();
+        tracing::info!(sample = ?sample_new, "dedup: sample of new lemmas for i+1");
+
+        let mut i1_skipped_all_known = 0usize;
+        let mut i1_skipped_multiple_unknown = 0usize;
 
         for (sentence, content_lemmas) in sentence_content_lemmas {
             let unknown_lemmas: Vec<&String> = content_lemmas.iter()
                 .filter(|l| !existing_lemmas.contains(l.as_str()) && new_lemmas.contains(l.as_str()))
                 .collect();
+
+            if unknown_lemmas.is_empty() {
+                i1_skipped_all_known += 1;
+            } else if unknown_lemmas.len() > 1 {
+                i1_skipped_multiple_unknown += 1;
+                tracing::info!(
+                    unknown_count = unknown_lemmas.len(),
+                    unknowns = ?unknown_lemmas,
+                    sentence_preview = &sentence[..sentence.len().min(80)],
+                    "dedup: i+1 skip — multiple unknowns in sentence"
+                );
+            }
 
             if unknown_lemmas.len() == 1 {
                 i_plus_one_found += 1;
@@ -1073,7 +1105,15 @@ async fn create_cards_from_analysis(
                 }
             }
         }
-        tracing::info!(duration_ms = i1_start.elapsed().as_millis() as u64, i_plus_one_found = i_plus_one_found, "create_cards_from_analysis i+1 analysis");
+        tracing::info!(
+            duration_ms = i1_start.elapsed().as_millis() as u64,
+            i_plus_one_found = i_plus_one_found,
+            sentences_all_known = i1_skipped_all_known,
+            sentences_multiple_unknown = i1_skipped_multiple_unknown,
+            total_sentences_checked = sentence_content_lemmas.len(),
+            unique_lemmas_with_i1 = i_plus_one_map.len(),
+            "dedup: i+1 analysis complete"
+        );
     }
 
     // Pre-compute all card data before batch insert
@@ -1096,7 +1136,27 @@ async fn create_cards_from_analysis(
         language: &str,
     ) -> AppResult<(usize, usize)> {
         if card_data_list.is_empty() {
+            tracing::info!(deck_id = %deck.id, deck_name = %deck.name, "dedup: insert_cards — no cards to insert, skipping");
             return Ok((0, 0));
+        }
+
+        tracing::info!(
+            deck_id = %deck.id,
+            deck_name = %deck.name,
+            cards_to_insert = card_data_list.len(),
+            sentences_to_insert = sentences.len(),
+            "dedup: insert_cards — starting batch insert"
+        );
+        // Log every lemma being inserted so we can cross-check against known_words
+        for (i, chunk) in card_data_list.chunks(50).enumerate() {
+            let lemmas_chunk: Vec<&str> = chunk.iter().map(|c| c.lemma.as_str()).collect();
+            tracing::info!(
+                batch = i,
+                count = chunk.len(),
+                lemmas = ?lemmas_chunk,
+                deck_name = %deck.name,
+                "dedup: insert_cards — lemmas being created"
+            );
         }
 
         let lemmas: Vec<&str> = card_data_list.iter().map(|c| c.lemma.as_str()).collect();
@@ -1127,7 +1187,16 @@ async fn create_cards_from_analysis(
 
         // Add known words
         let new_lemmas: Vec<&str> = card_data_list.iter().map(|c| c.lemma.as_str()).collect();
+        tracing::info!(
+            count = new_lemmas.len(),
+            deck_name = %deck.name,
+            "dedup: registering new lemmas in known_words"
+        );
         known_words_service::add_known_words(&state.db, auth_user.user_id, language, &new_lemmas).await?;
+        tracing::info!(
+            count = new_lemmas.len(),
+            "dedup: known_words insert complete (ON CONFLICT DO NOTHING)"
+        );
 
         // Insert card_states
         sqlx::query(
@@ -1140,6 +1209,11 @@ async fn create_cards_from_analysis(
         .bind(&card_ids)
         .execute(&state.db)
         .await?;
+        tracing::info!(
+            card_states = card_ids.len(),
+            deck_name = %deck.name,
+            "dedup: card_states created"
+        );
 
         // Build idx → card_id map
         let idx_to_card_id: HashMap<usize, uuid::Uuid> = (0..card_data_list.len())
@@ -1189,6 +1263,8 @@ async fn create_cards_from_analysis(
 
     let dict_start = Instant::now();
     let mut words_skipped_duplicate = 0;
+    let mut words_skipped_no_i1 = 0usize;
+    let mut words_skipped_no_dict = 0usize;
 
     // Build per-word data: dictionary info + which decks each word belongs to
     struct WordData {
@@ -1202,10 +1278,12 @@ async fn create_cards_from_analysis(
     }
 
     let mut word_data_list: Vec<WordData> = Vec::new();
+    let mut skipped_lemmas: Vec<String> = Vec::new();
 
     for (rank, (lemma, count)) in words.iter().enumerate() {
         if existing_lemmas.contains(lemma) {
             words_skipped_duplicate += 1;
+            skipped_lemmas.push(lemma.clone());
             continue;
         }
 
@@ -1213,6 +1291,7 @@ async fn create_cards_from_analysis(
 
         // If only i+1 requested and this word has no i+1 sentences, skip
         if want_i_plus_one && !want_word_def && !has_i1 {
+            words_skipped_no_i1 += 1;
             continue;
         }
 
@@ -1227,8 +1306,19 @@ async fn create_cards_from_analysis(
         };
 
         if is_japanese(language) && definitions.is_empty() {
+            words_skipped_no_dict += 1;
+            tracing::info!(lemma = lemma, "dedup: skipped — no dictionary entry (ja)");
             continue;
         }
+
+        tracing::info!(
+            rank = rank + 1,
+            lemma = lemma,
+            doc_freq = count,
+            has_i1 = has_i1,
+            has_definition = !definitions.is_empty(),
+            "dedup: word accepted for card creation"
+        );
 
         word_data_list.push(WordData {
             lemma: lemma.clone(),
@@ -1239,6 +1329,27 @@ async fn create_cards_from_analysis(
             doc_frequency: *count,
             has_i_plus_one: has_i1,
         });
+    }
+
+    // Log all skipped duplicates so we can verify dedup correctness
+    tracing::info!(
+        total_words_in_text = words.len(),
+        skipped_known = words_skipped_duplicate,
+        skipped_no_i1 = words_skipped_no_i1,
+        skipped_no_dict = words_skipped_no_dict,
+        accepted = word_data_list.len(),
+        "dedup: word filtering summary"
+    );
+    if !skipped_lemmas.is_empty() {
+        // Chunk skipped lemmas to avoid huge log lines
+        for (i, chunk) in skipped_lemmas.chunks(50).enumerate() {
+            tracing::info!(
+                batch = i,
+                count = chunk.len(),
+                lemmas = ?chunk,
+                "dedup: skipped known lemmas"
+            );
+        }
     }
     tracing::info!(
         duration_ms = dict_start.elapsed().as_millis() as u64,
