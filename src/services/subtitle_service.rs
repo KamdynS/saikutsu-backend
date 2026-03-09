@@ -34,6 +34,7 @@ pub async fn jimaku_search(api_key: &str, query: &str) -> anyhow::Result<Vec<Jim
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
     let url = format!("https://jimaku.cc/api/entries/search?query={}", urlencoding::encode(query));
+    tracing::info!(url = %url, "jimaku: searching");
 
     let response = client
         .get(&url)
@@ -41,17 +42,40 @@ pub async fn jimaku_search(api_key: &str, query: &str) -> anyhow::Result<Vec<Jim
         .send()
         .await?;
 
-    if response.status() == 429 {
+    let status = response.status();
+    tracing::info!(status = %status, "jimaku: search response");
+
+    if status == 429 {
         return Err(anyhow::anyhow!("Jimaku API rate limit exceeded. Please wait a few seconds and try again."));
     }
 
-    if !response.status().is_success() {
-        let status = response.status();
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        tracing::error!(status = %status, body = %body, "jimaku: search failed");
         return Err(anyhow::anyhow!("Jimaku API error ({}): {}", status, body));
     }
 
-    let entries: Vec<JimakuEntry> = response.json().await?;
+    let body_text = response.text().await?;
+    tracing::debug!(body_len = body_text.len(), body_preview = %&body_text[..body_text.len().min(500)], "jimaku: search response body");
+
+    let entries: Vec<JimakuEntry> = serde_json::from_str(&body_text)
+        .map_err(|e| {
+            tracing::error!(error = %e, body_preview = %&body_text[..body_text.len().min(200)], "jimaku: failed to parse search response");
+            anyhow::anyhow!("Failed to parse Jimaku search response: {}", e)
+        })?;
+
+    tracing::info!(count = entries.len(), "jimaku: search returned entries");
+    for entry in &entries {
+        tracing::debug!(
+            id = entry.id,
+            name = %entry.name,
+            english_name = ?entry.english_name,
+            anilist_id = ?entry.anilist_id,
+            is_movie = ?entry.flags.as_ref().and_then(|f| f.movie),
+            "jimaku: entry"
+        );
+    }
+
     Ok(entries)
 }
 
@@ -66,23 +90,41 @@ pub async fn jimaku_get_files(api_key: &str, entry_id: u64, episode: Option<u32>
         url.push_str(&format!("?episode={}", ep));
     }
 
+    tracing::info!(url = %url, entry_id = entry_id, episode = ?episode, "jimaku: fetching files");
+
     let response = client
         .get(&url)
         .headers(headers)
         .send()
         .await?;
 
-    if response.status() == 429 {
+    let status = response.status();
+    tracing::info!(status = %status, "jimaku: files response");
+
+    if status == 429 {
         return Err(anyhow::anyhow!("Jimaku API rate limit exceeded. Please wait a few seconds and try again."));
     }
 
-    if !response.status().is_success() {
-        let status = response.status();
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        tracing::error!(status = %status, body = %body, "jimaku: files request failed");
         return Err(anyhow::anyhow!("Jimaku API error ({}): {}", status, body));
     }
 
-    let files: Vec<JimakuFile> = response.json().await?;
+    let body_text = response.text().await?;
+    tracing::debug!(body_len = body_text.len(), body_preview = %&body_text[..body_text.len().min(500)], "jimaku: files response body");
+
+    let files: Vec<JimakuFile> = serde_json::from_str(&body_text)
+        .map_err(|e| {
+            tracing::error!(error = %e, body_preview = %&body_text[..body_text.len().min(200)], "jimaku: failed to parse files response");
+            anyhow::anyhow!("Failed to parse Jimaku files response: {}", e)
+        })?;
+
+    tracing::info!(count = files.len(), "jimaku: files returned");
+    for file in &files {
+        tracing::debug!(name = %file.name, size = ?file.size, "jimaku: file");
+    }
+
     Ok(files)
 }
 
@@ -91,18 +133,22 @@ pub async fn jimaku_download_file(api_key: &str, url: &str) -> anyhow::Result<St
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, HeaderValue::from_str(api_key)?);
 
+    tracing::info!(url = %url, "jimaku: downloading file");
+
     let response = client
         .get(url)
         .headers(headers)
         .send()
         .await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    if !status.is_success() {
+        tracing::error!(status = %status, url = %url, "jimaku: file download failed");
         return Err(anyhow::anyhow!("Failed to download subtitle file ({})", status));
     }
 
     let content = response.text().await?;
+    tracing::info!(url = %url, content_len = content.len(), "jimaku: file downloaded");
     Ok(content)
 }
 
@@ -113,6 +159,10 @@ pub async fn jimaku_download_file(api_key: &str, url: &str) -> anyhow::Result<St
 #[derive(Debug, Deserialize)]
 struct OpenSubSearchResponse {
     data: Vec<OpenSubSearchItem>,
+    #[serde(default)]
+    total_count: Option<u64>,
+    #[serde(default)]
+    total_pages: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +180,8 @@ struct OpenSubAttributes {
     season_number: Option<u32>,
     #[serde(default)]
     episode_number: Option<u32>,
+    #[serde(default)]
+    language: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,11 +191,17 @@ struct OpenSubFeatureDetails {
     #[serde(default)]
     movie_name: Option<String>,
     #[serde(default)]
+    parent_title: Option<String>,
+    #[serde(default)]
     year: Option<u32>,
     #[serde(default)]
     season_number: Option<u32>,
     #[serde(default)]
     episode_number: Option<u32>,
+    #[serde(default)]
+    feature_type: Option<String>,
+    #[serde(default)]
+    imdb_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +238,7 @@ pub async fn opensub_search(
         urlencoding::encode(query),
         language
     );
+    tracing::info!(url = %url, query = %query, language = %language, "opensub: searching");
 
     let response = client
         .get(&url)
@@ -189,30 +248,61 @@ pub async fn opensub_search(
         .send()
         .await?;
 
-    if response.status() == 429 {
+    let status = response.status();
+    tracing::info!(status = %status, "opensub: search response");
+
+    if status == 429 {
         return Err(anyhow::anyhow!("OpenSubtitles API rate limit exceeded. Please wait and try again."));
     }
 
-    if !response.status().is_success() {
-        let status = response.status();
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        tracing::error!(status = %status, body = %body, "opensub: search failed");
         return Err(anyhow::anyhow!("OpenSubtitles API error ({}): {}", status, body));
     }
 
-    let search_response: OpenSubSearchResponse = response.json().await?;
+    let body_text = response.text().await?;
+    tracing::debug!(body_len = body_text.len(), body_preview = %&body_text[..body_text.len().min(1000)], "opensub: search response body");
+
+    let search_response: OpenSubSearchResponse = serde_json::from_str(&body_text)
+        .map_err(|e| {
+            tracing::error!(error = %e, body_preview = %&body_text[..body_text.len().min(500)], "opensub: failed to parse search response");
+            anyhow::anyhow!("Failed to parse OpenSubtitles search response: {}", e)
+        })?;
+
+    tracing::info!(
+        raw_items = search_response.data.len(),
+        total_count = ?search_response.total_count,
+        total_pages = ?search_response.total_pages,
+        "opensub: search returned items"
+    );
 
     let mut entries = Vec::new();
     for item in search_response.data {
-        let title = item.attributes.feature_details
+        let fd = &item.attributes.feature_details;
+        let title = fd
             .as_ref()
-            .and_then(|fd| fd.title.clone().or(fd.movie_name.clone()))
+            .and_then(|fd| fd.parent_title.clone().or(fd.title.clone()).or(fd.movie_name.clone()))
             .unwrap_or_else(|| "Unknown".to_string());
 
-        let year = item.attributes.feature_details.as_ref().and_then(|fd| fd.year);
+        let year = fd.as_ref().and_then(|fd| fd.year);
         let season = item.attributes.season_number
-            .or(item.attributes.feature_details.as_ref().and_then(|fd| fd.season_number));
+            .or(fd.as_ref().and_then(|fd| fd.season_number));
         let episode = item.attributes.episode_number
-            .or(item.attributes.feature_details.as_ref().and_then(|fd| fd.episode_number));
+            .or(fd.as_ref().and_then(|fd| fd.episode_number));
+
+        tracing::debug!(
+            item_id = %item.id,
+            title = %title,
+            year = ?year,
+            season = ?season,
+            episode = ?episode,
+            feature_type = ?fd.as_ref().and_then(|f| f.feature_type.as_deref()),
+            imdb_id = ?fd.as_ref().and_then(|f| f.imdb_id),
+            language = ?item.attributes.language,
+            files = item.attributes.files.len(),
+            "opensub: search item"
+        );
 
         for file in &item.attributes.files {
             entries.push(OpenSubEntry {
@@ -227,11 +317,14 @@ pub async fn opensub_search(
         }
     }
 
+    tracing::info!(total_entries = entries.len(), "opensub: flattened entries (after expanding files)");
     Ok(entries)
 }
 
 pub async fn opensub_download(api_key: &str, file_id: u64) -> anyhow::Result<String> {
     let client = reqwest::Client::new();
+
+    tracing::info!(file_id = file_id, "opensub: requesting download link");
 
     // Request download link
     let response = client
@@ -243,13 +336,15 @@ pub async fn opensub_download(api_key: &str, file_id: u64) -> anyhow::Result<Str
         .send()
         .await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        tracing::error!(status = %status, file_id = file_id, body = %body, "opensub: download link request failed");
         return Err(anyhow::anyhow!("OpenSubtitles download error ({}): {}", status, body));
     }
 
     let download_response: OpenSubDownloadResponse = response.json().await?;
+    tracing::info!(file_id = file_id, link = %download_response.link, "opensub: got download link");
 
     // Download the actual file
     let file_response = client
@@ -257,10 +352,13 @@ pub async fn opensub_download(api_key: &str, file_id: u64) -> anyhow::Result<Str
         .send()
         .await?;
 
-    if !file_response.status().is_success() {
+    let file_status = file_response.status();
+    if !file_status.is_success() {
+        tracing::error!(status = %file_status, file_id = file_id, "opensub: file download failed");
         return Err(anyhow::anyhow!("Failed to download subtitle file"));
     }
 
     let content = file_response.text().await?;
+    tracing::info!(file_id = file_id, content_len = content.len(), "opensub: file downloaded");
     Ok(content)
 }
