@@ -15,10 +15,7 @@ use saikutsu::{api, config::Config, db, processing::{dictionary, lemma_dict}, Ap
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,sqlx=warn".into()),
-        )
+        .with_env_filter("debug,sqlx=warn,hyper=info,tower_http=info,reqwest=info")
         .init();
 
     // Load config
