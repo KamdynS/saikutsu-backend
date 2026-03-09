@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -34,24 +34,6 @@ pub struct Sentence {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct CardState {
-    pub id: Uuid,
-    pub user_id: Uuid,
-    pub card_id: Uuid,
-    pub status: String,
-    pub difficulty: f32,
-    pub stability: f32,
-    pub due_date: Option<NaiveDate>,
-    pub last_review: Option<DateTime<Utc>>,
-    pub reps: i32,
-    pub lapses: i32,
-    pub suspended: bool,
-    pub suspended_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
 #[derive(Debug, Serialize)]
 pub struct CardResponse {
     pub id: Uuid,
@@ -65,7 +47,6 @@ pub struct CardResponse {
     pub notes: Option<String>,
     pub tags: Vec<String>,
     pub sentences: Vec<SentenceResponse>,
-    pub state: Option<CardStateResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,31 +72,6 @@ impl From<Sentence> for SentenceResponse {
             source_page: sentence.source_page,
             audio_url: sentence.audio_url,
             is_primary: sentence.is_primary,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct CardStateResponse {
-    pub status: String,
-    pub difficulty: f32,
-    pub stability: f32,
-    pub due_date: Option<NaiveDate>,
-    pub reps: i32,
-    pub lapses: i32,
-    pub suspended: bool,
-}
-
-impl From<CardState> for CardStateResponse {
-    fn from(state: CardState) -> Self {
-        Self {
-            status: state.status,
-            difficulty: state.difficulty,
-            stability: state.stability,
-            due_date: state.due_date,
-            reps: state.reps,
-            lapses: state.lapses,
-            suspended: state.suspended,
         }
     }
 }

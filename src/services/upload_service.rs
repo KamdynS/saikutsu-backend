@@ -275,18 +275,6 @@ pub async fn finalize_upload(
         .fetch_one(pool)
         .await?;
 
-        // Create card state for user
-        sqlx::query(
-            r#"
-            INSERT INTO card_states (user_id, card_id, status)
-            VALUES ($1, $2, 'new')
-            "#
-        )
-        .bind(user_id)
-        .bind(card.id)
-        .execute(pool)
-        .await?;
-
         // Add sentences (up to 3 per word)
         if let Some(sentences) = processed.sentences.get(&word.lemma) {
             for (i, sentence) in sentences.iter().take(3).enumerate() {

@@ -399,11 +399,11 @@ async fn run_subtitle_job(
     let mut def_deck_ref: Option<usize> = None;
 
     if deck_types.contains(&DeckType::IPlusOne) {
-        let name = if both_types { format!("{} (cloze)", req.name) } else { req.name.clone() };
+        let name = if both_types { format!("{} (i+1)", req.name) } else { req.name.clone() };
         let settings = serde_json::json!({
             "new_cards_per_day": 20,
-            "study_mode": "cloze",
-            "deck_type": "cloze"
+            "study_mode": "flashcard",
+            "deck_type": "i_plus_one"
         });
         let deck = sqlx::query_as::<_, Deck>(
             r#"
@@ -424,7 +424,7 @@ async fn run_subtitle_job(
     }
 
     if deck_types.contains(&DeckType::WordDefinition) {
-        let name = if both_types { format!("{} (definition)", req.name) } else { req.name.clone() };
+        let name = if both_types { format!("{} (all words)", req.name) } else { req.name.clone() };
         let settings = serde_json::json!({
             "new_cards_per_day": 20,
             "study_mode": "flashcard",

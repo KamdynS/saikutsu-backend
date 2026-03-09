@@ -453,11 +453,11 @@ pub async fn create_deck_from_text(
     let mut def_deck_ref: Option<usize> = None;
 
     if deck_types.contains(&DeckType::IPlusOne) {
-        let name = if both_types { format!("{} (cloze)", deck_name) } else { deck_name.clone() };
+        let name = if both_types { format!("{} (i+1)", deck_name) } else { deck_name.clone() };
         let settings = serde_json::json!({
             "new_cards_per_day": 20,
-            "study_mode": "cloze",
-            "deck_type": "cloze"
+            "study_mode": "flashcard",
+            "deck_type": "i_plus_one"
         });
         let deck = sqlx::query_as::<_, Deck>(
             r#"
@@ -478,7 +478,7 @@ pub async fn create_deck_from_text(
     }
 
     if deck_types.contains(&DeckType::WordDefinition) {
-        let name = if both_types { format!("{} (definition)", deck_name) } else { deck_name.clone() };
+        let name = if both_types { format!("{} (all words)", deck_name) } else { deck_name.clone() };
         let settings = serde_json::json!({
             "new_cards_per_day": 20,
             "study_mode": "flashcard",
@@ -627,11 +627,11 @@ pub async fn create_deck_from_pdf(
     let mut def_deck_ref: Option<usize> = None;
 
     if deck_types.contains(&DeckType::IPlusOne) {
-        let name = if both_types { format!("{} (cloze)", deck_name) } else { deck_name.clone() };
+        let name = if both_types { format!("{} (i+1)", deck_name) } else { deck_name.clone() };
         let settings = serde_json::json!({
             "new_cards_per_day": 20,
-            "study_mode": "cloze",
-            "deck_type": "cloze"
+            "study_mode": "flashcard",
+            "deck_type": "i_plus_one"
         });
         let deck = sqlx::query_as::<_, Deck>(
             r#"
@@ -652,7 +652,7 @@ pub async fn create_deck_from_pdf(
     }
 
     if deck_types.contains(&DeckType::WordDefinition) {
-        let name = if both_types { format!("{} (definition)", deck_name) } else { deck_name.clone() };
+        let name = if both_types { format!("{} (all words)", deck_name) } else { deck_name.clone() };
         let settings = serde_json::json!({
             "new_cards_per_day": 20,
             "study_mode": "flashcard",
@@ -827,11 +827,11 @@ pub async fn create_deck_from_media(
     let mut def_deck_ref: Option<usize> = None;
 
     if deck_types.contains(&DeckType::IPlusOne) {
-        let name = if both_types { format!("{} (cloze)", deck_name) } else { deck_name.clone() };
+        let name = if both_types { format!("{} (i+1)", deck_name) } else { deck_name.clone() };
         let settings = serde_json::json!({
             "new_cards_per_day": 20,
-            "study_mode": "cloze",
-            "deck_type": "cloze"
+            "study_mode": "flashcard",
+            "deck_type": "i_plus_one"
         });
         let deck = sqlx::query_as::<_, Deck>(
             r#"
@@ -853,7 +853,7 @@ pub async fn create_deck_from_media(
     }
 
     if deck_types.contains(&DeckType::WordDefinition) {
-        let name = if both_types { format!("{} (definition)", deck_name) } else { deck_name.clone() };
+        let name = if both_types { format!("{} (all words)", deck_name) } else { deck_name.clone() };
         let settings = serde_json::json!({
             "new_cards_per_day": 20,
             "study_mode": "flashcard",
@@ -1061,18 +1061,6 @@ pub async fn create_cards_from_analysis(
         let new_lemmas: Vec<&str> = card_data_list.iter().map(|c| c.lemma.as_str()).collect();
         known_words_service::add_known_words(&state.db, auth_user.user_id, language, &new_lemmas).await?;
 
-        // Insert card_states
-        sqlx::query(
-            r#"
-            INSERT INTO card_states (user_id, card_id, status)
-            SELECT $1, unnest($2::uuid[]), 'new'
-            "#,
-        )
-        .bind(auth_user.user_id)
-        .bind(&card_ids)
-        .execute(&state.db)
-        .await?;
-
         // Build idx → card_id map
         let idx_to_card_id: HashMap<usize, uuid::Uuid> = (0..card_data_list.len())
             .zip(card_ids.iter())
@@ -1200,15 +1188,10 @@ pub async fn create_cards_from_analysis(
                     None => continue,
                 };
 
-                // For cloze cards, use the surface form (conjugated word) as the card lemma
-                // Use the first i+1 sentence's cloze_answer as the surface form
-                let surface_lemma = i1_sentences.first()
-                    .map(|(_, _, answer)| answer.clone())
-                    .unwrap_or_else(|| wd.lemma.clone());
-
+                // Use dictionary lemma as card lemma; surface form is stored in the sentence
                 let idx = cloze_card_data.len();
                 cloze_card_data.push(CardData {
-                    lemma: surface_lemma,
+                    lemma: wd.lemma.clone(),
                     reading: wd.reading.clone(),
                     definition: wd.definition.clone(),
                     pos: wd.pos.clone(),

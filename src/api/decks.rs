@@ -68,8 +68,7 @@ pub async fn create(
     let start = Instant::now();
     let deck_id = Uuid::new_v4();
     let settings = serde_json::json!({
-        "new_cards_per_day": 20,
-        "study_mode": "cloze"
+        "new_cards_per_day": 20
     });
 
     let valid_languages = ["ja", "es", "fr", "de", "it", "pt"];

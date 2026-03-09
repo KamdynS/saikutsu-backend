@@ -120,23 +120,9 @@ pub async fn import_apkg(
     known_words_service::add_known_words(&state.db, auth_user.user_id, &language, &lemma_refs).await?;
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "imports::import_apkg add known_words");
 
-    // Batch insert all card_states
-    let db_start = Instant::now();
-    sqlx::query(
-        r#"
-        INSERT INTO card_states (user_id, card_id, status)
-        SELECT $1, unnest($2::uuid[]), 'new'
-        "#,
-    )
-    .bind(auth_user.user_id)
-    .bind(&card_ids)
-    .execute(&state.db)
-    .await?;
-    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "imports::import_apkg batch insert card_states");
-
     // Update deck card count
     let db_start = Instant::now();
-    sqlx::query("UPDATE decks SET card_count = $1, new_count = $1 WHERE id = $2")
+    sqlx::query("UPDATE decks SET card_count = $1 WHERE id = $2")
         .bind(cards_created as i32)
         .bind(deck.id)
         .execute(&state.db)

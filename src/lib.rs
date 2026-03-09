@@ -2,7 +2,6 @@ pub mod api;
 pub mod config;
 pub mod db;
 pub mod error;
-pub mod fsrs;
 pub mod models;
 pub mod processing;
 pub mod services;

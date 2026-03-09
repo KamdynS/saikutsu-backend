@@ -99,11 +99,6 @@ async fn main() -> anyhow::Result<()> {
         // Cards
         .route("/v1/cards/{id}", get(api::cards::get))
         .route("/v1/cards/{id}", patch(api::cards::update))
-        .route("/v1/cards/{id}/suspend", post(api::cards::suspend))
-        .route("/v1/cards/{id}/reset", post(api::cards::reset))
-        // Reviews
-        .route("/v1/reviews/queue", get(api::reviews::get_queue))
-        .route("/v1/reviews", post(api::reviews::submit))
         // Export
         .route("/v1/decks/{id}/export", post(api::exports::export_apkg))
         // Analysis (endpoints that create decks need auth)

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     api::middleware::AuthUser,
     error::{AppError, AppResult},
-    models::{Card, CardListResponse, CardResponse, CardState, CreateCardRequest, Sentence, UpdateCardRequest},
+    models::{Card, CardListResponse, CardResponse, CreateCardRequest, Sentence, UpdateCardRequest},
     processing::normalization::normalize_lemma,
     services::known_words_service,
     AppState,
@@ -67,35 +67,21 @@ pub async fn list(
     )?;
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, cards_fetched = cards.len(), "cards::list fetch cards+count");
 
-    // Batch fetch card_states and sentences for all cards at once (avoids N+1)
+    // Batch fetch sentences for all cards at once (avoids N+1)
     let card_ids: Vec<Uuid> = cards.iter().map(|c| c.id).collect();
 
     let db_start = Instant::now();
-    let (card_states, sentences) = tokio::try_join!(
-        sqlx::query_as::<_, CardState>(
-            "SELECT * FROM card_states WHERE card_id = ANY($1) AND user_id = $2",
-        )
-        .bind(&card_ids)
-        .bind(auth_user.user_id)
-        .fetch_all(&state.db),
-        sqlx::query_as::<_, Sentence>(
-            "SELECT * FROM sentences WHERE card_id = ANY($1) ORDER BY is_primary DESC, created_at ASC",
-        )
-        .bind(&card_ids)
-        .fetch_all(&state.db),
-    )?;
+    let sentences = sqlx::query_as::<_, Sentence>(
+        "SELECT * FROM sentences WHERE card_id = ANY($1) ORDER BY is_primary DESC, created_at ASC",
+    )
+    .bind(&card_ids)
+    .fetch_all(&state.db)
+    .await?;
     tracing::info!(
         duration_ms = db_start.elapsed().as_millis() as u64,
-        states = card_states.len(),
         sentences = sentences.len(),
-        "cards::list fetch states+sentences"
+        "cards::list fetch sentences"
     );
-
-    // Index by card_id for O(1) lookups
-    let mut states_by_card: HashMap<Uuid, CardState> = HashMap::with_capacity(card_states.len());
-    for cs in card_states {
-        states_by_card.insert(cs.card_id, cs);
-    }
 
     let mut sentences_by_card: HashMap<Uuid, Vec<Sentence>> = HashMap::with_capacity(cards.len());
     for s in sentences {
@@ -123,7 +109,6 @@ pub async fn list(
                     .into_iter()
                     .map(|s| s.into())
                     .collect(),
-                state: states_by_card.remove(&card_id).map(|s| s.into()),
             }
         })
         .collect();
@@ -176,17 +161,6 @@ pub async fn create(
     .await?;
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::create insert card");
 
-    // Create card state for the user
-    let db_start = Instant::now();
-    sqlx::query(
-        "INSERT INTO card_states (user_id, card_id, status) VALUES ($1, $2, 'new')",
-    )
-    .bind(auth_user.user_id)
-    .bind(card.id)
-    .execute(&state.db)
-    .await?;
-    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::create insert card_state");
-
     // Add lemma to known_words
     let db_start = Instant::now();
     let norm = normalize_lemma(&req.lemma, &deck_language);
@@ -231,7 +205,6 @@ pub async fn create(
         notes: card.notes,
         tags: card.tags,
         sentences,
-        state: None,
     }))
 }
 
@@ -254,22 +227,15 @@ pub async fn get(
     .ok_or(AppError::NotFound("Card not found".to_string()))?;
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::get fetch card");
 
-    // Fetch state and sentences concurrently
+    // Fetch sentences
     let db_start = Instant::now();
-    let (state_result, sentences) = tokio::try_join!(
-        sqlx::query_as::<_, CardState>(
-            "SELECT * FROM card_states WHERE card_id = $1 AND user_id = $2",
-        )
-        .bind(card.id)
-        .bind(auth_user.user_id)
-        .fetch_optional(&state.db),
-        sqlx::query_as::<_, Sentence>(
-            "SELECT * FROM sentences WHERE card_id = $1 ORDER BY is_primary DESC, created_at ASC",
-        )
-        .bind(card.id)
-        .fetch_all(&state.db),
-    )?;
-    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::get fetch state+sentences");
+    let sentences = sqlx::query_as::<_, Sentence>(
+        "SELECT * FROM sentences WHERE card_id = $1 ORDER BY is_primary DESC, created_at ASC",
+    )
+    .bind(card.id)
+    .fetch_all(&state.db)
+    .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::get fetch sentences");
 
     tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "cards::get total");
 
@@ -285,7 +251,6 @@ pub async fn get(
         notes: card.notes,
         tags: card.tags,
         sentences: sentences.into_iter().map(|s| s.into()).collect(),
-        state: state_result.map(|s| s.into()),
     }))
 }
 
@@ -325,20 +290,13 @@ pub async fn update(
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::update db update");
 
     let db_start = Instant::now();
-    let (state_result, sentences) = tokio::try_join!(
-        sqlx::query_as::<_, CardState>(
-            "SELECT * FROM card_states WHERE card_id = $1 AND user_id = $2",
-        )
-        .bind(updated_card.id)
-        .bind(auth_user.user_id)
-        .fetch_optional(&state.db),
-        sqlx::query_as::<_, Sentence>(
-            "SELECT * FROM sentences WHERE card_id = $1 ORDER BY is_primary DESC",
-        )
-        .bind(updated_card.id)
-        .fetch_all(&state.db),
-    )?;
-    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::update fetch state+sentences");
+    let sentences = sqlx::query_as::<_, Sentence>(
+        "SELECT * FROM sentences WHERE card_id = $1 ORDER BY is_primary DESC",
+    )
+    .bind(updated_card.id)
+    .fetch_all(&state.db)
+    .await?;
+    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::update fetch sentences");
 
     tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "cards::update total");
 
@@ -354,68 +312,5 @@ pub async fn update(
         notes: updated_card.notes,
         tags: updated_card.tags,
         sentences: sentences.into_iter().map(|s| s.into()).collect(),
-        state: state_result.map(|s| s.into()),
     }))
-}
-
-pub async fn suspend(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
-    Extension(auth_user): Extension<AuthUser>,
-) -> AppResult<Json<serde_json::Value>> {
-    let start = Instant::now();
-
-    let db_start = Instant::now();
-    let result = sqlx::query(
-        r#"
-        UPDATE card_states SET suspended = true, suspended_at = NOW()
-        WHERE card_id = $1 AND user_id = $2
-          AND EXISTS (SELECT 1 FROM cards c JOIN decks d ON c.deck_id = d.id WHERE c.id = $1 AND d.user_id = $2)
-        "#,
-    )
-    .bind(id)
-    .bind(auth_user.user_id)
-    .execute(&state.db)
-    .await?;
-    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::suspend db query");
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("Card not found".to_string()));
-    }
-
-    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "cards::suspend total");
-
-    Ok(Json(serde_json::json!({ "message": "Card suspended" })))
-}
-
-pub async fn reset(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
-    Extension(auth_user): Extension<AuthUser>,
-) -> AppResult<Json<serde_json::Value>> {
-    let start = Instant::now();
-
-    let db_start = Instant::now();
-    let result = sqlx::query(
-        r#"
-        UPDATE card_states
-        SET status = 'new', difficulty = 0, stability = 0, due_date = NULL,
-            last_review = NULL, reps = 0, lapses = 0, suspended = false, suspended_at = NULL
-        WHERE card_id = $1 AND user_id = $2
-          AND EXISTS (SELECT 1 FROM cards c JOIN decks d ON c.deck_id = d.id WHERE c.id = $1 AND d.user_id = $2)
-        "#,
-    )
-    .bind(id)
-    .bind(auth_user.user_id)
-    .execute(&state.db)
-    .await?;
-    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::reset db query");
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("Card not found".to_string()));
-    }
-
-    tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "cards::reset total");
-
-    Ok(Json(serde_json::json!({ "message": "Card reset" })))
 }
