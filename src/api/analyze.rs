@@ -16,7 +16,7 @@ use crate::{
     AppState,
 };
 
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeckType {
     WordDefinition,

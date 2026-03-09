@@ -12,7 +12,7 @@ pub use error::{AppError, AppResult};
 
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 pub struct JwksCache {
     pub keys: Vec<(Option<String>, jsonwebtoken::DecodingKey)>,
@@ -24,6 +24,10 @@ pub struct AppState {
     pub config: Config,
     /// Cached JWKS decoding keys with TTL (refreshed after 1 hour)
     pub jwks_cache: RwLock<Option<JwksCache>>,
+    /// Rate limiter for Jimaku API — 1 concurrent download stream at a time
+    pub jimaku_semaphore: Semaphore,
+    /// Rate limiter for OpenSubtitles API — 1 concurrent download stream at a time
+    pub opensub_semaphore: Semaphore,
 }
 
 pub type SharedAppState = Arc<AppState>;

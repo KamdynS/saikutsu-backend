@@ -45,7 +45,16 @@ async fn main() -> anyhow::Result<()> {
         db: pool,
         config: config.clone(),
         jwks_cache: tokio::sync::RwLock::new(None),
+        jimaku_semaphore: tokio::sync::Semaphore::new(1),
+        opensub_semaphore: tokio::sync::Semaphore::new(1),
     });
+
+    // Mark any stale subtitle jobs (from previous crashes) as failed
+    let _ = sqlx::query(
+        "UPDATE subtitle_jobs SET status = 'failed', error_message = 'Server restarted during processing', updated_at = NOW() WHERE status IN ('queued', 'downloading', 'processing')"
+    )
+    .execute(&state.db)
+    .await;
 
     // Build CORS layer
     let allowed_methods = vec![
@@ -109,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/subtitles/search", post(api::subtitles::search))
         .route("/v1/subtitles/files", post(api::subtitles::list_files))
         .route("/v1/decks/from-subtitles", post(api::subtitles::create_deck_from_subtitles))
+        .route("/v1/subtitle-jobs/{id}", get(api::subtitles::get_job_status))
         // Settings routes
         .route("/v1/settings/api-keys", get(api::settings::list_api_keys))
         .route("/v1/settings/api-keys/{provider}", put(api::settings::set_api_key))
