@@ -1,6 +1,67 @@
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
+/// Truncate a string to at most `max_bytes`, snapping to a char boundary.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+// ============================================================================
+// Jimaku rate limit helpers
+// ============================================================================
+
+/// Rate limit info extracted from Jimaku response headers.
+#[derive(Debug, Clone)]
+pub struct JimakuRateLimit {
+    pub remaining: u32,
+    pub reset_after_secs: f64,
+}
+
+/// Parse Jimaku rate limit headers from a response.
+fn parse_jimaku_rate_limit(headers: &HeaderMap) -> Option<JimakuRateLimit> {
+    let remaining = headers
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u32>().ok())?;
+    let reset_after = headers
+        .get("x-ratelimit-reset-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(1.0);
+    Some(JimakuRateLimit { remaining, reset_after_secs: reset_after })
+}
+
+/// If rate limit headers indicate we're low on remaining requests, sleep
+/// until the bucket resets. Call this after every Jimaku API response.
+pub async fn jimaku_respect_rate_limit(rate_limit: Option<&JimakuRateLimit>) {
+    if let Some(rl) = rate_limit {
+        tracing::debug!(remaining = rl.remaining, reset_after = rl.reset_after_secs, "jimaku: rate limit status");
+        if rl.remaining <= 2 {
+            let wait = rl.reset_after_secs + 0.1; // small buffer
+            tracing::info!(wait_secs = wait, "jimaku: rate limit low, sleeping until reset");
+            tokio::time::sleep(tokio::time::Duration::from_secs_f64(wait)).await;
+        }
+    }
+}
+
+/// Maximum retries when we hit a 429.
+const JIMAKU_MAX_RETRIES: u32 = 3;
+
+/// Build the standard Jimaku auth headers.
+fn jimaku_auth_headers(api_key: &str) -> anyhow::Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, HeaderValue::from_str(api_key)?);
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(headers)
+}
+
 // ============================================================================
 // Jimaku API client (https://jimaku.cc/api)
 // ============================================================================
@@ -29,9 +90,7 @@ pub struct JimakuFile {
 
 pub async fn jimaku_search(api_key: &str, query: &str) -> anyhow::Result<Vec<JimakuEntry>> {
     let client = reqwest::Client::new();
-    let mut headers = HeaderMap::new();
-    headers.insert(AUTHORIZATION, HeaderValue::from_str(api_key)?);
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let headers = jimaku_auth_headers(api_key)?;
 
     let url = format!("https://jimaku.cc/api/entries/search?query={}", urlencoding::encode(query));
     tracing::info!(url = %url, "jimaku: searching");
@@ -46,7 +105,11 @@ pub async fn jimaku_search(api_key: &str, query: &str) -> anyhow::Result<Vec<Jim
     tracing::info!(status = %status, "jimaku: search response");
 
     if status == 429 {
-        return Err(anyhow::anyhow!("Jimaku API rate limit exceeded. Please wait a few seconds and try again."));
+        let rl = parse_jimaku_rate_limit(response.headers());
+        let wait = rl.as_ref().map(|r| r.reset_after_secs).unwrap_or(5.0);
+        return Err(anyhow::anyhow!(
+            "Jimaku API rate limit exceeded. Try again in {:.0} seconds.", wait
+        ));
     }
 
     if !status.is_success() {
@@ -55,12 +118,13 @@ pub async fn jimaku_search(api_key: &str, query: &str) -> anyhow::Result<Vec<Jim
         return Err(anyhow::anyhow!("Jimaku API error ({}): {}", status, body));
     }
 
+    let rate_limit = parse_jimaku_rate_limit(response.headers());
     let body_text = response.text().await?;
-    tracing::debug!(body_len = body_text.len(), body_preview = %&body_text[..body_text.len().min(500)], "jimaku: search response body");
+    tracing::debug!(body_len = body_text.len(), body_preview = %truncate_str(&body_text, 500), "jimaku: search response body");
 
     let entries: Vec<JimakuEntry> = serde_json::from_str(&body_text)
         .map_err(|e| {
-            tracing::error!(error = %e, body_preview = %&body_text[..body_text.len().min(200)], "jimaku: failed to parse search response");
+            tracing::error!(error = %e, body_preview = %truncate_str(&body_text, 200), "jimaku: failed to parse search response");
             anyhow::anyhow!("Failed to parse Jimaku search response: {}", e)
         })?;
 
@@ -76,14 +140,13 @@ pub async fn jimaku_search(api_key: &str, query: &str) -> anyhow::Result<Vec<Jim
         );
     }
 
+    jimaku_respect_rate_limit(rate_limit.as_ref()).await;
     Ok(entries)
 }
 
 pub async fn jimaku_get_files(api_key: &str, entry_id: u64, episode: Option<u32>) -> anyhow::Result<Vec<JimakuFile>> {
     let client = reqwest::Client::new();
-    let mut headers = HeaderMap::new();
-    headers.insert(AUTHORIZATION, HeaderValue::from_str(api_key)?);
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let headers = jimaku_auth_headers(api_key)?;
 
     let mut url = format!("https://jimaku.cc/api/entries/{}/files", entry_id);
     if let Some(ep) = episode {
@@ -102,7 +165,11 @@ pub async fn jimaku_get_files(api_key: &str, entry_id: u64, episode: Option<u32>
     tracing::info!(status = %status, "jimaku: files response");
 
     if status == 429 {
-        return Err(anyhow::anyhow!("Jimaku API rate limit exceeded. Please wait a few seconds and try again."));
+        let rl = parse_jimaku_rate_limit(response.headers());
+        let wait = rl.as_ref().map(|r| r.reset_after_secs).unwrap_or(5.0);
+        return Err(anyhow::anyhow!(
+            "Jimaku API rate limit exceeded. Try again in {:.0} seconds.", wait
+        ));
     }
 
     if !status.is_success() {
@@ -111,12 +178,13 @@ pub async fn jimaku_get_files(api_key: &str, entry_id: u64, episode: Option<u32>
         return Err(anyhow::anyhow!("Jimaku API error ({}): {}", status, body));
     }
 
+    let rate_limit = parse_jimaku_rate_limit(response.headers());
     let body_text = response.text().await?;
-    tracing::debug!(body_len = body_text.len(), body_preview = %&body_text[..body_text.len().min(500)], "jimaku: files response body");
+    tracing::debug!(body_len = body_text.len(), body_preview = %truncate_str(&body_text, 500), "jimaku: files response body");
 
     let files: Vec<JimakuFile> = serde_json::from_str(&body_text)
         .map_err(|e| {
-            tracing::error!(error = %e, body_preview = %&body_text[..body_text.len().min(200)], "jimaku: failed to parse files response");
+            tracing::error!(error = %e, body_preview = %truncate_str(&body_text, 200), "jimaku: failed to parse files response");
             anyhow::anyhow!("Failed to parse Jimaku files response: {}", e)
         })?;
 
@@ -125,31 +193,54 @@ pub async fn jimaku_get_files(api_key: &str, entry_id: u64, episode: Option<u32>
         tracing::debug!(name = %file.name, size = ?file.size, "jimaku: file");
     }
 
+    jimaku_respect_rate_limit(rate_limit.as_ref()).await;
     Ok(files)
 }
 
-pub async fn jimaku_download_file(api_key: &str, url: &str) -> anyhow::Result<String> {
+/// Download a single Jimaku file with automatic retry on 429.
+/// Returns the file content and the rate limit info from the successful response.
+pub async fn jimaku_download_file(api_key: &str, url: &str) -> anyhow::Result<(String, Option<JimakuRateLimit>)> {
     let client = reqwest::Client::new();
-    let mut headers = HeaderMap::new();
-    headers.insert(AUTHORIZATION, HeaderValue::from_str(api_key)?);
 
-    tracing::info!(url = %url, "jimaku: downloading file");
+    for attempt in 0..JIMAKU_MAX_RETRIES {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(api_key)?);
 
-    let response = client
-        .get(url)
-        .headers(headers)
-        .send()
-        .await?;
+        tracing::info!(url = %url, attempt = attempt + 1, "jimaku: downloading file");
 
-    let status = response.status();
-    if !status.is_success() {
-        tracing::error!(status = %status, url = %url, "jimaku: file download failed");
-        return Err(anyhow::anyhow!("Failed to download subtitle file ({})", status));
+        let response = client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await?;
+
+        let status = response.status();
+
+        if status == 429 {
+            let rl = parse_jimaku_rate_limit(response.headers());
+            let wait = rl.as_ref().map(|r| r.reset_after_secs).unwrap_or(5.0) + 0.1;
+            tracing::warn!(
+                url = %url,
+                attempt = attempt + 1,
+                wait_secs = wait,
+                "jimaku: 429 rate limited, sleeping before retry"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs_f64(wait)).await;
+            continue;
+        }
+
+        if !status.is_success() {
+            tracing::error!(status = %status, url = %url, "jimaku: file download failed");
+            return Err(anyhow::anyhow!("Failed to download subtitle file ({})", status));
+        }
+
+        let rate_limit = parse_jimaku_rate_limit(response.headers());
+        let content = response.text().await?;
+        tracing::info!(url = %url, content_len = content.len(), "jimaku: file downloaded");
+        return Ok((content, rate_limit));
     }
 
-    let content = response.text().await?;
-    tracing::info!(url = %url, content_len = content.len(), "jimaku: file downloaded");
-    Ok(content)
+    Err(anyhow::anyhow!("Jimaku download failed after {} retries (rate limited)", JIMAKU_MAX_RETRIES))
 }
 
 // ============================================================================
@@ -262,11 +353,11 @@ pub async fn opensub_search(
     }
 
     let body_text = response.text().await?;
-    tracing::debug!(body_len = body_text.len(), body_preview = %&body_text[..body_text.len().min(1000)], "opensub: search response body");
+    tracing::debug!(body_len = body_text.len(), body_preview = %truncate_str(&body_text, 1000), "opensub: search response body");
 
     let search_response: OpenSubSearchResponse = serde_json::from_str(&body_text)
         .map_err(|e| {
-            tracing::error!(error = %e, body_preview = %&body_text[..body_text.len().min(500)], "opensub: failed to parse search response");
+            tracing::error!(error = %e, body_preview = %truncate_str(&body_text, 500), "opensub: failed to parse search response");
             anyhow::anyhow!("Failed to parse OpenSubtitles search response: {}", e)
         })?;
 

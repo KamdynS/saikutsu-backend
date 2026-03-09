@@ -18,9 +18,20 @@ use crate::{
     AppState,
 };
 
-/// Delay between individual file downloads within a single job (ms).
-/// At 250ms we stay safely under 5 req/s per provider.
-const DOWNLOAD_DELAY_MS: u64 = 250;
+/// Delay between individual file downloads for OpenSubtitles (ms).
+const OPENSUB_DOWNLOAD_DELAY_MS: u64 = 250;
+
+/// Truncate a string to at most `max_bytes`, snapping to a char boundary.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 // ============================================================================
 // Search — returns grouped show + per-episode entries
@@ -421,7 +432,7 @@ async fn run_subtitle_job(
     tracing::info!(
         job_id = %job_id,
         chars = subtitle_text.len(),
-        text_preview = %&subtitle_text[..subtitle_text.len().min(200)],
+        text_preview = %truncate_str(&subtitle_text, 200),
         "subtitle job: text extracted"
     );
 
@@ -651,19 +662,11 @@ async fn download_jimaku_rate_limited(
     tracing::info!(job_id = %job_id, total_files = total, "jimaku download: starting");
     update_job_downloading(&state.db, job_id, 0, total as i32).await;
 
-    // Acquire the Jimaku semaphore — only one download stream at a time
-    let _permit = state.jimaku_semaphore.acquire().await
-        .map_err(|_| anyhow::anyhow!("Jimaku rate limiter closed"))?;
-
     let mut all_text = String::new();
     for (i, url) in file_urls.iter().enumerate() {
-        if i > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(DOWNLOAD_DELAY_MS)).await;
-        }
-
         update_job_downloading(&state.db, job_id, (i + 1) as i32, total as i32).await;
 
-        let content = subtitle_service::jimaku_download_file(&api_key, url).await?;
+        let (content, rate_limit) = subtitle_service::jimaku_download_file(&api_key, url).await?;
         let filename = url.rsplit('/').next().unwrap_or("subtitle.srt");
 
         tracing::info!(
@@ -672,7 +675,7 @@ async fn download_jimaku_rate_limited(
             total = total,
             filename = %filename,
             content_len = content.len(),
-            content_preview = %&content[..content.len().min(100)],
+            content_preview = %truncate_str(&content, 100),
             "jimaku download: file fetched"
         );
 
@@ -688,6 +691,9 @@ async fn download_jimaku_rate_limited(
             all_text.push(' ');
         }
         all_text.push_str(&parsed);
+
+        // Respect Jimaku rate limits before next download
+        subtitle_service::jimaku_respect_rate_limit(rate_limit.as_ref()).await;
     }
 
     tracing::info!(job_id = %job_id, total_text_len = all_text.len(), "jimaku download: complete");
@@ -723,7 +729,7 @@ async fn download_opensub_rate_limited(
     let mut all_text = String::new();
     for (i, file_id) in file_ids.iter().enumerate() {
         if i > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(DOWNLOAD_DELAY_MS)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(OPENSUB_DOWNLOAD_DELAY_MS)).await;
         }
 
         update_job_downloading(&state.db, job_id, (i + 1) as i32, total as i32).await;
@@ -736,7 +742,7 @@ async fn download_opensub_rate_limited(
             total = total,
             file_id = file_id,
             content_len = content.len(),
-            content_preview = %&content[..content.len().min(100)],
+            content_preview = %truncate_str(&content, 100),
             "opensub download: file fetched"
         );
 
