@@ -16,6 +16,18 @@ use crate::{
     AppState,
 };
 
+/// Truncate a string to at most `max_bytes`, snapping to a char boundary.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeckType {
@@ -1082,7 +1094,7 @@ pub async fn create_cards_from_analysis(
                 tracing::debug!(
                     unknown_count = unknown_lemmas.len(),
                     unknowns = ?unknown_lemmas,
-                    sentence_preview = &sentence[..sentence.len().min(80)],
+                    sentence_preview = truncate_str(sentence, 80),
                     "dedup: i+1 skip — multiple unknowns in sentence"
                 );
             }
