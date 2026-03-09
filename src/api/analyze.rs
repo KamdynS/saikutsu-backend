@@ -16,18 +16,6 @@ use crate::{
     AppState,
 };
 
-/// Truncate a string to at most `max_bytes`, snapping to a char boundary.
-fn truncate_str(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeckType {
@@ -192,17 +180,9 @@ pub fn analyze_text_core(
         std::borrow::Cow::Borrowed(full_text)
     };
 
-    let step_start = Instant::now();
     let sentences = split_sentences(&text, language);
-    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, sentences = sentences.len(), "analyze_text_core split_sentences");
-
-    // Tokenize full text only ONCE (was previously tokenized again per-sentence)
-    let step_start = Instant::now();
     let all_tokens = tokenize_text(&text, language)?;
-    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, tokens = all_tokens.len(), "analyze_text_core tokenize full text");
 
-    // Build surface form and POS mappings (normalized lemma keys)
-    let step_start = Instant::now();
     let mut surface_forms: HashMap<String, Vec<String>> = HashMap::new();
     let mut pos_map: HashMap<String, String> = HashMap::new();
 
@@ -221,11 +201,6 @@ pub fn analyze_text_core(
         forms.sort();
         forms.dedup();
     }
-    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, "analyze_text_core build surface/pos maps");
-
-    // Build lemma → sentences and sentence → content lemmas mappings
-    // using per-sentence tokenization for accurate matching (no false positives from substring matching)
-    let step_start = Instant::now();
     let mut lemma_sentences: HashMap<String, Vec<String>> = HashMap::new();
     let mut sentence_content_lemmas: HashMap<String, HashSet<String>> = HashMap::new();
 
@@ -242,8 +217,6 @@ pub fn analyze_text_core(
         }
         sentence_content_lemmas.insert(sentence.clone(), seen);
     }
-    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, sentences_tokenized = sentences.len(), "analyze_text_core per-sentence tokenization");
-
     // Limit sentences per word
     for sents in lemma_sentences.values_mut() {
         sents.sort_by_key(|s| {
@@ -265,11 +238,7 @@ fn build_word_list(
     lemma_sentences: &HashMap<String, Vec<String>>,
     language: &str,
 ) -> Vec<WordInfo> {
-    let step_start = Instant::now();
     let freq_map = frequency::count_lemmas(all_tokens, language);
-    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, "build_word_list count_lemmas");
-
-    let step_start = Instant::now();
     let mut words: Vec<WordInfo> = freq_map
         .into_iter()
         .map(|(lemma, wf)| {
@@ -298,8 +267,6 @@ fn build_word_list(
         .collect();
 
     words.sort_by(|a, b| b.count.cmp(&a.count));
-    tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, unique_words = words.len(), "build_word_list dictionary lookups + sort");
-
     words
 }
 
@@ -310,7 +277,6 @@ pub async fn analyze_pdf(mut multipart: Multipart) -> AppResult<Json<AnalysisRes
     let mut pdf_bytes: Option<Vec<u8>> = None;
     let mut language_hint: Option<String> = None;
 
-    let upload_start = Instant::now();
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().map(|s| s.to_string());
         let file_name = field.file_name().map(|s| s.to_string());
@@ -330,7 +296,6 @@ pub async fn analyze_pdf(mut multipart: Multipart) -> AppResult<Json<AnalysisRes
             _ => {}
         }
     }
-    tracing::info!(duration_ms = upload_start.elapsed().as_millis() as u64, "analyze::analyze_pdf read upload");
 
     let filename = filename.ok_or_else(|| AppError::BadRequest("No file provided".to_string()))?;
     let pdf_bytes = pdf_bytes.ok_or_else(|| AppError::BadRequest("No file data".to_string()))?;
@@ -339,27 +304,21 @@ pub async fn analyze_pdf(mut multipart: Multipart) -> AppResult<Json<AnalysisRes
         return Err(AppError::BadRequest("Only PDF files are supported".to_string()));
     }
 
-    let extract_start = Instant::now();
     let pages = pdf::extract_text_from_bytes(&pdf_bytes)
         .map_err(|e| AppError::BadRequest(format!("Failed to extract text: {}", e)))?;
-    tracing::info!(duration_ms = extract_start.elapsed().as_millis() as u64, pages = pages.len(), "analyze::analyze_pdf PDF extraction");
 
     let full_text: String = pages.iter().map(|p| p.text.clone()).collect::<Vec<_>>().join("\n");
     let language = detect_language(&full_text, language_hint.as_deref());
     let text_length = full_text.len();
     let sample_text: String = full_text.chars().take(500).collect();
 
-    let core_start = Instant::now();
     let (all_tokens, sentences, surface_forms, pos_map, lemma_sentences, _sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
-    tracing::info!(duration_ms = core_start.elapsed().as_millis() as u64, "analyze::analyze_pdf analyze_text_core total");
 
     let total_tokens = all_tokens.len();
     let content_token_count = all_tokens.iter().filter(|t| t.is_content).count();
 
-    let word_list_start = Instant::now();
     let words = build_word_list(&all_tokens, &surface_forms, &pos_map, &lemma_sentences, &language);
-    tracing::info!(duration_ms = word_list_start.elapsed().as_millis() as u64, "analyze::analyze_pdf build_word_list total");
 
     let unique_words = words.len();
     let sentence_count = sentences.len();
@@ -401,17 +360,13 @@ pub async fn analyze_text(
     let text_length = full_text.len();
     let sample_text: String = full_text.chars().take(500).collect();
 
-    let core_start = Instant::now();
     let (all_tokens, sentences, surface_forms, pos_map, lemma_sentences, _sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
-    tracing::info!(duration_ms = core_start.elapsed().as_millis() as u64, "analyze::analyze_text analyze_text_core total");
 
     let total_tokens = all_tokens.len();
     let content_token_count = all_tokens.iter().filter(|t| t.is_content).count();
 
-    let word_list_start = Instant::now();
     let words = build_word_list(&all_tokens, &surface_forms, &pos_map, &lemma_sentences, &language);
-    tracing::info!(duration_ms = word_list_start.elapsed().as_millis() as u64, "analyze::analyze_text build_word_list total");
 
     let unique_words = words.len();
     let sentence_count = sentences.len();
@@ -479,12 +434,9 @@ pub async fn create_deck_from_text(
 
     let language = detect_language(&full_text, req.language.as_deref());
 
-    let core_start = Instant::now();
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
-    tracing::info!(duration_ms = core_start.elapsed().as_millis() as u64, "analyze::create_deck_from_text analyze_text_core");
 
-    let freq_start = Instant::now();
     let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
     let mut words: Vec<(String, i32)> = freq_map
@@ -492,12 +444,10 @@ pub async fn create_deck_from_text(
         .map(|(lemma, wf)| (lemma.clone(), wf.doc_count))
         .collect();
     words.sort_by(|a, b| b.1.cmp(&a.1));
-    tracing::info!(duration_ms = freq_start.elapsed().as_millis() as u64, words = words.len(), "analyze::create_deck_from_text frequency counting");
 
     let both_types = deck_types.contains(&DeckType::IPlusOne) && deck_types.contains(&DeckType::WordDefinition);
 
     // Create deck(s) based on selected types
-    let db_start = Instant::now();
     let mut created_decks: Vec<Deck> = Vec::new();
     let mut cloze_deck_ref: Option<usize> = None;
     let mut def_deck_ref: Option<usize> = None;
@@ -551,9 +501,7 @@ pub async fn create_deck_from_text(
         def_deck_ref = Some(created_decks.len());
         created_decks.push(deck);
     }
-    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, decks = created_decks.len(), "analyze::create_deck_from_text create deck(s)");
 
-    let cards_start = Instant::now();
     let result = create_cards_from_analysis(
         &state, &auth_user,
         cloze_deck_ref.map(|i| &created_decks[i]),
@@ -562,7 +510,6 @@ pub async fn create_deck_from_text(
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
         &sentence_content_lemmas, &language,
     ).await?;
-    tracing::info!(duration_ms = cards_start.elapsed().as_millis() as u64, "analyze::create_deck_from_text create_cards_from_analysis");
 
     // Update descriptions with actual card counts (post-dedup)
     let skipped = result.words_skipped_duplicate;
@@ -605,7 +552,6 @@ pub async fn create_deck_from_pdf(
     let mut deck_types: Vec<DeckType> = Vec::new();
     let mut language_hint: Option<String> = None;
 
-    let upload_start = Instant::now();
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().map(|s| s.to_string());
         let file_name = field.file_name().map(|s| s.to_string());
@@ -644,7 +590,6 @@ pub async fn create_deck_from_pdf(
             _ => {}
         }
     }
-    tracing::info!(duration_ms = upload_start.elapsed().as_millis() as u64, "analyze::create_deck_from_pdf read upload");
 
     if deck_types.is_empty() {
         deck_types = vec![DeckType::WordDefinition];
@@ -658,20 +603,15 @@ pub async fn create_deck_from_pdf(
         return Err(AppError::BadRequest("Only PDF files are supported".to_string()));
     }
 
-    let extract_start = Instant::now();
     let pages = pdf::extract_text_from_bytes(&pdf_bytes)
         .map_err(|e| AppError::BadRequest(format!("Failed to extract text: {}", e)))?;
-    tracing::info!(duration_ms = extract_start.elapsed().as_millis() as u64, pages = pages.len(), "analyze::create_deck_from_pdf PDF extraction");
 
     let full_text: String = pages.iter().map(|p| p.text.clone()).collect::<Vec<_>>().join("\n");
     let language = detect_language(&full_text, language_hint.as_deref());
 
-    let core_start = Instant::now();
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&full_text, &language)?;
-    tracing::info!(duration_ms = core_start.elapsed().as_millis() as u64, "analyze::create_deck_from_pdf analyze_text_core");
 
-    let freq_start = Instant::now();
     let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
     let mut words: Vec<(String, i32)> = freq_map
@@ -679,11 +619,9 @@ pub async fn create_deck_from_pdf(
         .map(|(lemma, wf)| (lemma.clone(), wf.doc_count))
         .collect();
     words.sort_by(|a, b| b.1.cmp(&a.1));
-    tracing::info!(duration_ms = freq_start.elapsed().as_millis() as u64, words = words.len(), "analyze::create_deck_from_pdf frequency counting");
 
     let both_types = deck_types.contains(&DeckType::IPlusOne) && deck_types.contains(&DeckType::WordDefinition);
 
-    let db_start = Instant::now();
     let mut created_decks: Vec<Deck> = Vec::new();
     let mut cloze_deck_ref: Option<usize> = None;
     let mut def_deck_ref: Option<usize> = None;
@@ -737,9 +675,7 @@ pub async fn create_deck_from_pdf(
         def_deck_ref = Some(created_decks.len());
         created_decks.push(deck);
     }
-    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, decks = created_decks.len(), "analyze::create_deck_from_pdf create deck(s)");
 
-    let cards_start = Instant::now();
     let result = create_cards_from_analysis(
         &state, &auth_user,
         cloze_deck_ref.map(|i| &created_decks[i]),
@@ -748,7 +684,6 @@ pub async fn create_deck_from_pdf(
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
         &sentence_content_lemmas, &language,
     ).await?;
-    tracing::info!(duration_ms = cards_start.elapsed().as_millis() as u64, "analyze::create_deck_from_pdf create_cards_from_analysis");
 
     // Update descriptions with actual card counts (post-dedup)
     let skipped = result.words_skipped_duplicate;
@@ -795,7 +730,6 @@ pub async fn create_deck_from_media(
     let mut deck_types: Vec<DeckType> = Vec::new();
     let mut language_hint: Option<String> = None;
 
-    let upload_start = Instant::now();
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().map(|s| s.to_string());
         let file_name = field.file_name().map(|s| s.to_string());
@@ -834,7 +768,6 @@ pub async fn create_deck_from_media(
             _ => {}
         }
     }
-    tracing::info!(duration_ms = upload_start.elapsed().as_millis() as u64, "analyze::create_deck_from_media read upload");
 
     if deck_types.is_empty() {
         deck_types = vec![DeckType::WordDefinition];
@@ -860,7 +793,6 @@ pub async fn create_deck_from_media(
 
     tracing::info!("Transcribing {} file: {}", source_type, filename);
 
-    let transcribe_start = Instant::now();
     let (transcript, duration) = transcription::transcribe_media(
         &file_bytes,
         &filename,
@@ -869,12 +801,6 @@ pub async fn create_deck_from_media(
     )
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Transcription failed: {}", e)))?;
-    tracing::info!(
-        duration_ms = transcribe_start.elapsed().as_millis() as u64,
-        media_duration_s = duration as u64,
-        transcript_chars = transcript.len(),
-        "analyze::create_deck_from_media transcription"
-    );
 
     if transcript.trim().is_empty() {
         return Err(AppError::BadRequest("Transcription produced no text. The file may contain no speech.".to_string()));
@@ -882,12 +808,9 @@ pub async fn create_deck_from_media(
 
     let language = detect_language(&transcript, language_hint.as_deref());
 
-    let core_start = Instant::now();
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         analyze_text_core(&transcript, &language)?;
-    tracing::info!(duration_ms = core_start.elapsed().as_millis() as u64, "analyze::create_deck_from_media analyze_text_core");
 
-    let freq_start = Instant::now();
     let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
     let mut words: Vec<(String, i32)> = freq_map
@@ -895,12 +818,10 @@ pub async fn create_deck_from_media(
         .map(|(lemma, wf)| (lemma.clone(), wf.doc_count))
         .collect();
     words.sort_by(|a, b| b.1.cmp(&a.1));
-    tracing::info!(duration_ms = freq_start.elapsed().as_millis() as u64, words = words.len(), "analyze::create_deck_from_media frequency counting");
 
     let both_types = deck_types.contains(&DeckType::IPlusOne) && deck_types.contains(&DeckType::WordDefinition);
     let placeholder_desc = format!("from {} ({:.0}s)", filename, duration);
 
-    let db_start = Instant::now();
     let mut created_decks: Vec<Deck> = Vec::new();
     let mut cloze_deck_ref: Option<usize> = None;
     let mut def_deck_ref: Option<usize> = None;
@@ -956,9 +877,7 @@ pub async fn create_deck_from_media(
         def_deck_ref = Some(created_decks.len());
         created_decks.push(deck);
     }
-    tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, decks = created_decks.len(), "analyze::create_deck_from_media create deck(s)");
 
-    let cards_start = Instant::now();
     let result = create_cards_from_analysis(
         &state, &auth_user,
         cloze_deck_ref.map(|i| &created_decks[i]),
@@ -967,7 +886,6 @@ pub async fn create_deck_from_media(
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
         &sentence_content_lemmas, &language,
     ).await?;
-    tracing::info!(duration_ms = cards_start.elapsed().as_millis() as u64, "analyze::create_deck_from_media create_cards_from_analysis");
 
     // Update descriptions with actual card counts (post-dedup)
     let skipped = result.words_skipped_duplicate;
@@ -1044,18 +962,7 @@ pub async fn create_cards_from_analysis(
     let start = Instant::now();
 
     // Query existing known lemmas for this user+language (language-scoped dedup)
-    let db_start = Instant::now();
     let existing_lemmas = known_words_service::get_known_lemmas(&state.db, auth_user.user_id, language).await?;
-    tracing::info!(
-        duration_ms = db_start.elapsed().as_millis() as u64,
-        known_count = existing_lemmas.len(),
-        user_id = %auth_user.user_id,
-        language = language,
-        "dedup: fetched known_words for user"
-    );
-    // Log a sample of known lemmas so we can verify normalization
-    let sample_known: Vec<&str> = existing_lemmas.iter().take(20).map(|s| s.as_str()).collect();
-    tracing::debug!(sample = ?sample_known, "dedup: sample of existing known lemmas");
 
     let want_word_def = deck_types.contains(&DeckType::WordDefinition);
     let want_i_plus_one = deck_types.contains(&DeckType::IPlusOne);
@@ -1065,39 +972,15 @@ pub async fn create_cards_from_analysis(
     let mut i_plus_one_found: usize = 0;
 
     if want_i_plus_one {
-        let i1_start = Instant::now();
         let new_lemmas: HashSet<&str> = words.iter()
             .map(|(lemma, _)| lemma.as_str())
             .filter(|l| !existing_lemmas.contains(*l))
             .collect();
-        tracing::info!(
-            total_words_in_text = words.len(),
-            new_lemmas_count = new_lemmas.len(),
-            filtered_by_known = words.len() - new_lemmas.len(),
-            "dedup: i+1 new_lemmas built (words in text minus known)"
-        );
-        let sample_new: Vec<&&str> = new_lemmas.iter().take(15).collect();
-        tracing::debug!(sample = ?sample_new, "dedup: sample of new lemmas for i+1");
-
-        let mut i1_skipped_all_known = 0usize;
-        let mut i1_skipped_multiple_unknown = 0usize;
 
         for (sentence, content_lemmas) in sentence_content_lemmas {
             let unknown_lemmas: Vec<&String> = content_lemmas.iter()
                 .filter(|l| !existing_lemmas.contains(l.as_str()) && new_lemmas.contains(l.as_str()))
                 .collect();
-
-            if unknown_lemmas.is_empty() {
-                i1_skipped_all_known += 1;
-            } else if unknown_lemmas.len() > 1 {
-                i1_skipped_multiple_unknown += 1;
-                tracing::debug!(
-                    unknown_count = unknown_lemmas.len(),
-                    unknowns = ?unknown_lemmas,
-                    sentence_preview = truncate_str(sentence, 80),
-                    "dedup: i+1 skip — multiple unknowns in sentence"
-                );
-            }
 
             if unknown_lemmas.len() == 1 {
                 i_plus_one_found += 1;
@@ -1123,15 +1006,6 @@ pub async fn create_cards_from_analysis(
                 }
             }
         }
-        tracing::info!(
-            duration_ms = i1_start.elapsed().as_millis() as u64,
-            i_plus_one_found = i_plus_one_found,
-            sentences_all_known = i1_skipped_all_known,
-            sentences_multiple_unknown = i1_skipped_multiple_unknown,
-            total_sentences_checked = sentence_content_lemmas.len(),
-            unique_lemmas_with_i1 = i_plus_one_map.len(),
-            "dedup: i+1 analysis complete"
-        );
     }
 
     // Pre-compute all card data before batch insert
@@ -1154,27 +1028,7 @@ pub async fn create_cards_from_analysis(
         language: &str,
     ) -> AppResult<(usize, usize)> {
         if card_data_list.is_empty() {
-            tracing::info!(deck_id = %deck.id, deck_name = %deck.name, "dedup: insert_cards — no cards to insert, skipping");
             return Ok((0, 0));
-        }
-
-        tracing::info!(
-            deck_id = %deck.id,
-            deck_name = %deck.name,
-            cards_to_insert = card_data_list.len(),
-            sentences_to_insert = sentences.len(),
-            "dedup: insert_cards — starting batch insert"
-        );
-        // Log every lemma being inserted so we can cross-check against known_words
-        for (i, chunk) in card_data_list.chunks(50).enumerate() {
-            let lemmas_chunk: Vec<&str> = chunk.iter().map(|c| c.lemma.as_str()).collect();
-            tracing::debug!(
-                batch = i,
-                count = chunk.len(),
-                lemmas = ?lemmas_chunk,
-                deck_name = %deck.name,
-                "dedup: insert_cards — lemmas being created"
-            );
         }
 
         let lemmas: Vec<&str> = card_data_list.iter().map(|c| c.lemma.as_str()).collect();
@@ -1205,16 +1059,7 @@ pub async fn create_cards_from_analysis(
 
         // Add known words
         let new_lemmas: Vec<&str> = card_data_list.iter().map(|c| c.lemma.as_str()).collect();
-        tracing::info!(
-            count = new_lemmas.len(),
-            deck_name = %deck.name,
-            "dedup: registering new lemmas in known_words"
-        );
         known_words_service::add_known_words(&state.db, auth_user.user_id, language, &new_lemmas).await?;
-        tracing::info!(
-            count = new_lemmas.len(),
-            "dedup: known_words insert complete (ON CONFLICT DO NOTHING)"
-        );
 
         // Insert card_states
         sqlx::query(
@@ -1227,11 +1072,6 @@ pub async fn create_cards_from_analysis(
         .bind(&card_ids)
         .execute(&state.db)
         .await?;
-        tracing::info!(
-            card_states = card_ids.len(),
-            deck_name = %deck.name,
-            "dedup: card_states created"
-        );
 
         // Build idx → card_id map
         let idx_to_card_id: HashMap<usize, uuid::Uuid> = (0..card_data_list.len())
@@ -1279,10 +1119,7 @@ pub async fn create_cards_from_analysis(
         Ok((cards_created, sentences_created))
     }
 
-    let dict_start = Instant::now();
     let mut words_skipped_duplicate = 0;
-    let mut words_skipped_no_i1 = 0usize;
-    let mut words_skipped_no_dict = 0usize;
 
     // Build per-word data: dictionary info + which decks each word belongs to
     struct WordData {
@@ -1296,12 +1133,10 @@ pub async fn create_cards_from_analysis(
     }
 
     let mut word_data_list: Vec<WordData> = Vec::new();
-    let mut skipped_lemmas: Vec<String> = Vec::new();
 
     for (rank, (lemma, count)) in words.iter().enumerate() {
         if existing_lemmas.contains(lemma) {
             words_skipped_duplicate += 1;
-            skipped_lemmas.push(lemma.clone());
             continue;
         }
 
@@ -1309,7 +1144,6 @@ pub async fn create_cards_from_analysis(
 
         // If only i+1 requested and this word has no i+1 sentences, skip
         if want_i_plus_one && !want_word_def && !has_i1 {
-            words_skipped_no_i1 += 1;
             continue;
         }
 
@@ -1324,19 +1158,8 @@ pub async fn create_cards_from_analysis(
         };
 
         if is_japanese(language) && definitions.is_empty() {
-            words_skipped_no_dict += 1;
-            tracing::debug!(lemma = lemma, "dedup: skipped — no dictionary entry (ja)");
             continue;
         }
-
-        tracing::debug!(
-            rank = rank + 1,
-            lemma = lemma,
-            doc_freq = count,
-            has_i1 = has_i1,
-            has_definition = !definitions.is_empty(),
-            "dedup: word accepted for card creation"
-        );
 
         word_data_list.push(WordData {
             lemma: lemma.clone(),
@@ -1348,33 +1171,6 @@ pub async fn create_cards_from_analysis(
             has_i_plus_one: has_i1,
         });
     }
-
-    // Log all skipped duplicates so we can verify dedup correctness
-    tracing::info!(
-        total_words_in_text = words.len(),
-        skipped_known = words_skipped_duplicate,
-        skipped_no_i1 = words_skipped_no_i1,
-        skipped_no_dict = words_skipped_no_dict,
-        accepted = word_data_list.len(),
-        "dedup: word filtering summary"
-    );
-    if !skipped_lemmas.is_empty() {
-        // Chunk skipped lemmas to avoid huge log lines
-        for (i, chunk) in skipped_lemmas.chunks(50).enumerate() {
-            tracing::debug!(
-                batch = i,
-                count = chunk.len(),
-                lemmas = ?chunk,
-                "dedup: skipped known lemmas"
-            );
-        }
-    }
-    tracing::info!(
-        duration_ms = dict_start.elapsed().as_millis() as u64,
-        words_to_process = word_data_list.len(),
-        skipped = words_skipped_duplicate,
-        "create_cards_from_analysis dictionary lookups + card data prep"
-    );
 
     if word_data_list.is_empty() {
         return Ok(CardCreationResult {
@@ -1425,11 +1221,9 @@ pub async fn create_cards_from_analysis(
                 }
             }
 
-            let db_start = Instant::now();
             let (cards, sents) = insert_cards_for_deck(
                 state, auth_user, c_deck, &cloze_card_data, &cloze_sentences, language,
             ).await?;
-            tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, cards, sents, "create_cards_from_analysis cloze deck insert");
             total_cards_created += cards;
             total_sentences_created += sents;
         }
@@ -1477,11 +1271,9 @@ pub async fn create_cards_from_analysis(
                 }
             }
 
-            let db_start = Instant::now();
             let (cards, sents) = insert_cards_for_deck(
                 state, auth_user, d_deck, &def_card_data, &def_sentences, language,
             ).await?;
-            tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, cards, sents, "create_cards_from_analysis definition deck insert");
             total_cards_created += cards;
             total_sentences_created += sents;
         }

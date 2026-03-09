@@ -21,18 +21,6 @@ use crate::{
 /// Delay between individual file downloads for OpenSubtitles (ms).
 const OPENSUB_DOWNLOAD_DELAY_MS: u64 = 250;
 
-/// Truncate a string to at most `max_bytes`, snapping to a char boundary.
-fn truncate_str(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 // ============================================================================
 // Search — returns grouped show + per-episode entries
 // ============================================================================
@@ -69,12 +57,7 @@ pub async fn search(
         return Err(AppError::BadRequest("Search query cannot be empty".to_string()));
     }
 
-    tracing::info!(
-        query = %req.query,
-        language = %req.language,
-        user_id = %auth_user.user_id,
-        "subtitle search request"
-    );
+    tracing::info!(query = %req.query, language = %req.language, "subtitle search");
 
     if req.language == "ja" {
         let encryption_key = state.config.encryption_key.as_deref().ok_or_else(|| {
@@ -85,11 +68,11 @@ pub async fn search(
         let entries = subtitle_service::jimaku_search(&api_key, &req.query)
             .await
             .map_err(|e| {
-                tracing::error!(error = %e, "subtitle search: jimaku_search failed");
+                tracing::error!(error = %e, "jimaku search failed");
                 AppError::Internal(anyhow::anyhow!("{}", e))
             })?;
 
-        let result = SubtitleSearchResult {
+        Ok(Json(SubtitleSearchResult {
             entries: entries
                 .into_iter()
                 .map(|e| SubtitleEntry {
@@ -103,15 +86,7 @@ pub async fn search(
                 })
                 .collect(),
             provider: "jimaku".to_string(),
-        };
-
-        tracing::info!(
-            provider = "jimaku",
-            entries = result.entries.len(),
-            "subtitle search complete"
-        );
-
-        Ok(Json(result))
+        }))
     } else {
         let api_key = state.config.opensubtitles_api_key.as_deref().ok_or_else(|| {
             AppError::Internal(anyhow::anyhow!("OPENSUBTITLES_API_KEY is not configured"))
@@ -120,11 +95,11 @@ pub async fn search(
         let entries = subtitle_service::opensub_search(api_key, &req.query, &req.language)
             .await
             .map_err(|e| {
-                tracing::error!(error = %e, "subtitle search: opensub_search failed");
+                tracing::error!(error = %e, "opensub search failed");
                 AppError::Internal(anyhow::anyhow!("{}", e))
             })?;
 
-        let result = SubtitleSearchResult {
+        Ok(Json(SubtitleSearchResult {
             entries: entries
                 .into_iter()
                 .map(|e| SubtitleEntry {
@@ -138,15 +113,7 @@ pub async fn search(
                 })
                 .collect(),
             provider: "opensubtitles".to_string(),
-        };
-
-        tracing::info!(
-            provider = "opensubtitles",
-            entries = result.entries.len(),
-            "subtitle search complete"
-        );
-
-        Ok(Json(result))
+        }))
     }
 }
 
@@ -172,12 +139,7 @@ pub async fn list_files(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<SubtitleFilesRequest>,
 ) -> AppResult<Json<Vec<SubtitleFileInfo>>> {
-    tracing::info!(
-        entry_id = %req.entry_id,
-        language = %req.language,
-        user_id = %auth_user.user_id,
-        "list_files request"
-    );
+    tracing::info!(entry_id = %req.entry_id, "listing subtitle files");
 
     if req.language == "ja" {
         let encryption_key = state.config.encryption_key.as_deref().ok_or_else(|| {
@@ -188,19 +150,12 @@ pub async fn list_files(
         let entry_id: u64 = req.entry_id.parse()
             .map_err(|_| AppError::BadRequest("Invalid entry ID".to_string()))?;
 
-        // Fetch ALL files (no episode filter) so frontend can show what's available
         let files = subtitle_service::jimaku_get_files(&api_key, entry_id, None)
             .await
             .map_err(|e| {
-                tracing::error!(error = %e, entry_id = entry_id, "list_files: jimaku_get_files failed");
+                tracing::error!(error = %e, "jimaku get_files failed");
                 AppError::Internal(anyhow::anyhow!("{}", e))
             })?;
-
-        tracing::info!(
-            entry_id = entry_id,
-            file_count = files.len(),
-            "list_files: jimaku files returned"
-        );
 
         Ok(Json(
             files
@@ -250,16 +205,7 @@ pub async fn create_deck_from_subtitles(
         return Err(AppError::BadRequest("Deck name cannot be empty".to_string()));
     }
 
-    tracing::info!(
-        user_id = %auth_user.user_id,
-        language = %req.language,
-        name = %req.name,
-        entry_id = %req.entry_id,
-        file_ids = ?req.file_ids,
-        file_urls_count = req.file_urls.as_ref().map(|u| u.len()),
-        deck_types = ?req.deck_types,
-        "create_deck_from_subtitles: request received"
-    );
+    tracing::info!(name = %req.name, language = %req.language, "creating subtitle deck");
 
     // Validate we have the right keys before creating the job
     if req.language == "ja" {
@@ -289,7 +235,7 @@ pub async fn create_deck_from_subtitles(
     .fetch_one(&state.db)
     .await?;
 
-    tracing::info!(job_id = %job_id, "create_deck_from_subtitles: job created, spawning background task");
+    tracing::info!(job_id = %job_id, "subtitle job created");
 
     // Spawn background task
     let task_state = state.clone();
@@ -387,7 +333,7 @@ async fn run_subtitle_job(
     user_id: Uuid,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
-    tracing::info!(job_id = %job_id, user_id = %user_id, "subtitle job: starting");
+    tracing::info!(job_id = %job_id, "subtitle job: starting");
 
     // Load the request from the job row
     let request_data: serde_json::Value = sqlx::query_scalar(
@@ -404,15 +350,7 @@ async fn run_subtitle_job(
         req.deck_types.clone()
     };
 
-    tracing::info!(
-        job_id = %job_id,
-        language = %req.language,
-        name = %req.name,
-        deck_types = ?deck_types,
-        "subtitle job: loaded request"
-    );
-
-    // ── Step 1: Download subtitles with rate limiting ──
+    // ── Step 1: Download subtitles ──
     let subtitle_text = match download_with_rate_limiting(&state, job_id, user_id, &req).await {
         Ok(text) => text,
         Err(e) => {
@@ -424,24 +362,15 @@ async fn run_subtitle_job(
 
     if subtitle_text.trim().is_empty() {
         let msg = "No subtitle text could be extracted. The files may be empty or in an unsupported format.";
-        tracing::warn!(job_id = %job_id, "subtitle job: empty text after download/parse");
         update_job_failed(&state.db, job_id, msg).await;
         return Err(anyhow::anyhow!("{}", msg));
     }
-
-    tracing::info!(
-        job_id = %job_id,
-        chars = subtitle_text.len(),
-        text_preview = %truncate_str(&subtitle_text, 200),
-        "subtitle job: text extracted"
-    );
 
     // ── Step 2: Analyze text ──
     update_job_stage(&state.db, job_id, "processing", "analyzing text").await;
     tracing::info!(job_id = %job_id, "subtitle job: analyzing text");
 
     let language = detect_language(&subtitle_text, Some(&req.language));
-    tracing::info!(job_id = %job_id, detected_language = %language, "subtitle job: language detected");
 
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
         match analyze_text_core(&subtitle_text, &language) {
@@ -460,16 +389,9 @@ async fn run_subtitle_job(
         .collect();
     words.sort_by(|a, b| b.1.cmp(&a.1));
 
-    tracing::info!(
-        job_id = %job_id,
-        total_tokens = all_tokens.len(),
-        unique_words = words.len(),
-        surface_forms = surface_forms.len(),
-        "subtitle job: analysis complete"
-    );
-
     // ── Step 3: Create decks ──
     update_job_stage(&state.db, job_id, "processing", "creating deck").await;
+    tracing::info!(job_id = %job_id, "subtitle job: creating decks");
 
     let both_types = deck_types.contains(&DeckType::IPlusOne) && deck_types.contains(&DeckType::WordDefinition);
     let mut created_decks: Vec<Deck> = Vec::new();
@@ -497,7 +419,6 @@ async fn run_subtitle_job(
         .bind(&settings)
         .fetch_one(&state.db)
         .await?;
-        tracing::info!(job_id = %job_id, deck_id = %deck.id, deck_name = %name, "subtitle job: cloze deck created");
         cloze_deck_ref = Some(created_decks.len());
         created_decks.push(deck);
     }
@@ -523,7 +444,6 @@ async fn run_subtitle_job(
         .bind(&settings)
         .fetch_one(&state.db)
         .await?;
-        tracing::info!(job_id = %job_id, deck_id = %deck.id, deck_name = %name, "subtitle job: definition deck created");
         def_deck_ref = Some(created_decks.len());
         created_decks.push(deck);
     }
@@ -543,15 +463,6 @@ async fn run_subtitle_job(
         &sentence_content_lemmas, &language,
     ).await
     .map_err(|e| anyhow::anyhow!("Card creation failed: {}", e))?;
-
-    tracing::info!(
-        job_id = %job_id,
-        cards_created = result.cards_created,
-        sentences_created = result.sentences_created,
-        i_plus_one_found = result.i_plus_one_found,
-        words_skipped_duplicate = result.words_skipped_duplicate,
-        "subtitle job: cards generated"
-    );
 
     // Update deck descriptions
     let skipped = result.words_skipped_duplicate;
@@ -636,21 +547,17 @@ async fn download_jimaku_rate_limited(
     // Determine what files to download
     let file_urls: Vec<String> = if let Some(urls) = &req.file_urls {
         if urls.is_empty() {
-            // Empty array = fetch all files for the entry
             let entry_id: u64 = req.entry_id.parse()?;
-            tracing::info!(job_id = %job_id, entry_id = entry_id, "jimaku download: no file_urls provided, fetching all files");
             let files = subtitle_service::jimaku_get_files(&api_key, entry_id, None).await?;
             if files.is_empty() {
                 return Err(anyhow::anyhow!("No subtitle files found for this entry."));
             }
             files.into_iter().map(|f| f.url).collect()
         } else {
-            tracing::info!(job_id = %job_id, count = urls.len(), "jimaku download: using provided file_urls");
             urls.clone()
         }
     } else {
         let entry_id: u64 = req.entry_id.parse()?;
-        tracing::info!(job_id = %job_id, entry_id = entry_id, "jimaku download: file_urls is None, fetching all files");
         let files = subtitle_service::jimaku_get_files(&api_key, entry_id, None).await?;
         if files.is_empty() {
             return Err(anyhow::anyhow!("No subtitle files found for this entry."));
@@ -659,7 +566,7 @@ async fn download_jimaku_rate_limited(
     };
 
     let total = file_urls.len();
-    tracing::info!(job_id = %job_id, total_files = total, "jimaku download: starting");
+    tracing::info!(job_id = %job_id, files = total, "downloading jimaku subtitles");
     update_job_downloading(&state.db, job_id, 0, total as i32).await;
 
     let mut all_text = String::new();
@@ -669,23 +576,7 @@ async fn download_jimaku_rate_limited(
         let (content, rate_limit) = subtitle_service::jimaku_download_file(&api_key, url).await?;
         let filename = url.rsplit('/').next().unwrap_or("subtitle.srt");
 
-        tracing::info!(
-            job_id = %job_id,
-            file = i + 1,
-            total = total,
-            filename = %filename,
-            content_len = content.len(),
-            content_preview = %truncate_str(&content, 100),
-            "jimaku download: file fetched"
-        );
-
         let parsed = sub_parser::parse_subtitle_file(filename, &content)?;
-        tracing::debug!(
-            job_id = %job_id,
-            file = i + 1,
-            parsed_len = parsed.len(),
-            "jimaku download: file parsed"
-        );
 
         if !all_text.is_empty() {
             all_text.push(' ');
@@ -696,7 +587,6 @@ async fn download_jimaku_rate_limited(
         subtitle_service::jimaku_respect_rate_limit(rate_limit.as_ref()).await;
     }
 
-    tracing::info!(job_id = %job_id, total_text_len = all_text.len(), "jimaku download: complete");
     Ok(all_text)
 }
 
@@ -719,7 +609,7 @@ async fn download_opensub_rate_limited(
     }
 
     let total = file_ids.len();
-    tracing::info!(job_id = %job_id, total_files = total, file_ids = ?file_ids, "opensub download: starting");
+    tracing::info!(job_id = %job_id, files = total, "downloading opensub subtitles");
     update_job_downloading(&state.db, job_id, 0, total as i32).await;
 
     // Acquire the OpenSubtitles semaphore — only one download stream at a time
@@ -735,24 +625,7 @@ async fn download_opensub_rate_limited(
         update_job_downloading(&state.db, job_id, (i + 1) as i32, total as i32).await;
 
         let content = subtitle_service::opensub_download(api_key, *file_id).await?;
-
-        tracing::info!(
-            job_id = %job_id,
-            file = i + 1,
-            total = total,
-            file_id = file_id,
-            content_len = content.len(),
-            content_preview = %truncate_str(&content, 100),
-            "opensub download: file fetched"
-        );
-
         let parsed = sub_parser::parse_subtitle_file("subtitle.srt", &content)?;
-        tracing::debug!(
-            job_id = %job_id,
-            file = i + 1,
-            parsed_len = parsed.len(),
-            "opensub download: file parsed"
-        );
 
         if !all_text.is_empty() {
             all_text.push(' ');
@@ -760,7 +633,6 @@ async fn download_opensub_rate_limited(
         all_text.push_str(&parsed);
     }
 
-    tracing::info!(job_id = %job_id, total_text_len = all_text.len(), "opensub download: complete");
     Ok(all_text)
 }
 

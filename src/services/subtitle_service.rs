@@ -1,18 +1,6 @@
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
-/// Truncate a string to at most `max_bytes`, snapping to a char boundary.
-fn truncate_str(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 // ============================================================================
 // Jimaku rate limit helpers
 // ============================================================================
@@ -42,10 +30,9 @@ fn parse_jimaku_rate_limit(headers: &HeaderMap) -> Option<JimakuRateLimit> {
 /// until the bucket resets. Call this after every Jimaku API response.
 pub async fn jimaku_respect_rate_limit(rate_limit: Option<&JimakuRateLimit>) {
     if let Some(rl) = rate_limit {
-        tracing::debug!(remaining = rl.remaining, reset_after = rl.reset_after_secs, "jimaku: rate limit status");
         if rl.remaining <= 2 {
-            let wait = rl.reset_after_secs + 0.1; // small buffer
-            tracing::info!(wait_secs = wait, "jimaku: rate limit low, sleeping until reset");
+            let wait = rl.reset_after_secs + 0.1;
+            tracing::info!(wait_secs = wait, remaining = rl.remaining, "jimaku: rate limit low, waiting");
             tokio::time::sleep(tokio::time::Duration::from_secs_f64(wait)).await;
         }
     }
@@ -93,7 +80,6 @@ pub async fn jimaku_search(api_key: &str, query: &str) -> anyhow::Result<Vec<Jim
     let headers = jimaku_auth_headers(api_key)?;
 
     let url = format!("https://jimaku.cc/api/entries/search?query={}", urlencoding::encode(query));
-    tracing::info!(url = %url, "jimaku: searching");
 
     let response = client
         .get(&url)
@@ -102,7 +88,6 @@ pub async fn jimaku_search(api_key: &str, query: &str) -> anyhow::Result<Vec<Jim
         .await?;
 
     let status = response.status();
-    tracing::info!(status = %status, "jimaku: search response");
 
     if status == 429 {
         let rl = parse_jimaku_rate_limit(response.headers());
@@ -120,25 +105,9 @@ pub async fn jimaku_search(api_key: &str, query: &str) -> anyhow::Result<Vec<Jim
 
     let rate_limit = parse_jimaku_rate_limit(response.headers());
     let body_text = response.text().await?;
-    tracing::debug!(body_len = body_text.len(), body_preview = %truncate_str(&body_text, 500), "jimaku: search response body");
 
     let entries: Vec<JimakuEntry> = serde_json::from_str(&body_text)
-        .map_err(|e| {
-            tracing::error!(error = %e, body_preview = %truncate_str(&body_text, 200), "jimaku: failed to parse search response");
-            anyhow::anyhow!("Failed to parse Jimaku search response: {}", e)
-        })?;
-
-    tracing::info!(count = entries.len(), "jimaku: search returned entries");
-    for entry in &entries {
-        tracing::debug!(
-            id = entry.id,
-            name = %entry.name,
-            english_name = ?entry.english_name,
-            anilist_id = ?entry.anilist_id,
-            is_movie = ?entry.flags.as_ref().and_then(|f| f.movie),
-            "jimaku: entry"
-        );
-    }
+        .map_err(|e| anyhow::anyhow!("Failed to parse Jimaku search response: {}", e))?;
 
     jimaku_respect_rate_limit(rate_limit.as_ref()).await;
     Ok(entries)
@@ -153,8 +122,6 @@ pub async fn jimaku_get_files(api_key: &str, entry_id: u64, episode: Option<u32>
         url.push_str(&format!("?episode={}", ep));
     }
 
-    tracing::info!(url = %url, entry_id = entry_id, episode = ?episode, "jimaku: fetching files");
-
     let response = client
         .get(&url)
         .headers(headers)
@@ -162,7 +129,6 @@ pub async fn jimaku_get_files(api_key: &str, entry_id: u64, episode: Option<u32>
         .await?;
 
     let status = response.status();
-    tracing::info!(status = %status, "jimaku: files response");
 
     if status == 429 {
         let rl = parse_jimaku_rate_limit(response.headers());
@@ -180,18 +146,9 @@ pub async fn jimaku_get_files(api_key: &str, entry_id: u64, episode: Option<u32>
 
     let rate_limit = parse_jimaku_rate_limit(response.headers());
     let body_text = response.text().await?;
-    tracing::debug!(body_len = body_text.len(), body_preview = %truncate_str(&body_text, 500), "jimaku: files response body");
 
     let files: Vec<JimakuFile> = serde_json::from_str(&body_text)
-        .map_err(|e| {
-            tracing::error!(error = %e, body_preview = %truncate_str(&body_text, 200), "jimaku: failed to parse files response");
-            anyhow::anyhow!("Failed to parse Jimaku files response: {}", e)
-        })?;
-
-    tracing::info!(count = files.len(), "jimaku: files returned");
-    for file in &files {
-        tracing::debug!(name = %file.name, size = ?file.size, "jimaku: file");
-    }
+        .map_err(|e| anyhow::anyhow!("Failed to parse Jimaku files response: {}", e))?;
 
     jimaku_respect_rate_limit(rate_limit.as_ref()).await;
     Ok(files)
@@ -206,8 +163,6 @@ pub async fn jimaku_download_file(api_key: &str, url: &str) -> anyhow::Result<(S
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(api_key)?);
 
-        tracing::info!(url = %url, attempt = attempt + 1, "jimaku: downloading file");
-
         let response = client
             .get(url)
             .headers(headers)
@@ -219,24 +174,18 @@ pub async fn jimaku_download_file(api_key: &str, url: &str) -> anyhow::Result<(S
         if status == 429 {
             let rl = parse_jimaku_rate_limit(response.headers());
             let wait = rl.as_ref().map(|r| r.reset_after_secs).unwrap_or(5.0) + 0.1;
-            tracing::warn!(
-                url = %url,
-                attempt = attempt + 1,
-                wait_secs = wait,
-                "jimaku: 429 rate limited, sleeping before retry"
-            );
+            tracing::warn!(attempt = attempt + 1, wait_secs = wait, "jimaku: 429 rate limited, retrying");
             tokio::time::sleep(tokio::time::Duration::from_secs_f64(wait)).await;
             continue;
         }
 
         if !status.is_success() {
-            tracing::error!(status = %status, url = %url, "jimaku: file download failed");
+            tracing::error!(status = %status, "jimaku: file download failed");
             return Err(anyhow::anyhow!("Failed to download subtitle file ({})", status));
         }
 
         let rate_limit = parse_jimaku_rate_limit(response.headers());
         let content = response.text().await?;
-        tracing::info!(url = %url, content_len = content.len(), "jimaku: file downloaded");
         return Ok((content, rate_limit));
     }
 
@@ -329,7 +278,6 @@ pub async fn opensub_search(
         urlencoding::encode(query),
         language
     );
-    tracing::info!(url = %url, query = %query, language = %language, "opensub: searching");
 
     let response = client
         .get(&url)
@@ -340,7 +288,6 @@ pub async fn opensub_search(
         .await?;
 
     let status = response.status();
-    tracing::info!(status = %status, "opensub: search response");
 
     if status == 429 {
         return Err(anyhow::anyhow!("OpenSubtitles API rate limit exceeded. Please wait and try again."));
@@ -353,20 +300,9 @@ pub async fn opensub_search(
     }
 
     let body_text = response.text().await?;
-    tracing::debug!(body_len = body_text.len(), body_preview = %truncate_str(&body_text, 1000), "opensub: search response body");
 
     let search_response: OpenSubSearchResponse = serde_json::from_str(&body_text)
-        .map_err(|e| {
-            tracing::error!(error = %e, body_preview = %truncate_str(&body_text, 500), "opensub: failed to parse search response");
-            anyhow::anyhow!("Failed to parse OpenSubtitles search response: {}", e)
-        })?;
-
-    tracing::info!(
-        raw_items = search_response.data.len(),
-        total_count = ?search_response.total_count,
-        total_pages = ?search_response.total_pages,
-        "opensub: search returned items"
-    );
+        .map_err(|e| anyhow::anyhow!("Failed to parse OpenSubtitles search response: {}", e))?;
 
     let mut entries = Vec::new();
     for item in search_response.data {
@@ -382,19 +318,6 @@ pub async fn opensub_search(
         let episode = item.attributes.episode_number
             .or(fd.as_ref().and_then(|fd| fd.episode_number));
 
-        tracing::debug!(
-            item_id = %item.id,
-            title = %title,
-            year = ?year,
-            season = ?season,
-            episode = ?episode,
-            feature_type = ?fd.as_ref().and_then(|f| f.feature_type.as_deref()),
-            imdb_id = ?fd.as_ref().and_then(|f| f.imdb_id),
-            language = ?item.attributes.language,
-            files = item.attributes.files.len(),
-            "opensub: search item"
-        );
-
         for file in &item.attributes.files {
             entries.push(OpenSubEntry {
                 id: item.id.clone(),
@@ -408,14 +331,11 @@ pub async fn opensub_search(
         }
     }
 
-    tracing::info!(total_entries = entries.len(), "opensub: flattened entries (after expanding files)");
     Ok(entries)
 }
 
 pub async fn opensub_download(api_key: &str, file_id: u64) -> anyhow::Result<String> {
     let client = reqwest::Client::new();
-
-    tracing::info!(file_id = file_id, "opensub: requesting download link");
 
     // Request download link
     let response = client
@@ -430,12 +350,11 @@ pub async fn opensub_download(api_key: &str, file_id: u64) -> anyhow::Result<Str
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        tracing::error!(status = %status, file_id = file_id, body = %body, "opensub: download link request failed");
+        tracing::error!(status = %status, body = %body, "opensub: download link request failed");
         return Err(anyhow::anyhow!("OpenSubtitles download error ({}): {}", status, body));
     }
 
     let download_response: OpenSubDownloadResponse = response.json().await?;
-    tracing::info!(file_id = file_id, link = %download_response.link, "opensub: got download link");
 
     // Download the actual file
     let file_response = client
@@ -445,11 +364,10 @@ pub async fn opensub_download(api_key: &str, file_id: u64) -> anyhow::Result<Str
 
     let file_status = file_response.status();
     if !file_status.is_success() {
-        tracing::error!(status = %file_status, file_id = file_id, "opensub: file download failed");
+        tracing::error!(status = %file_status, "opensub: file download failed");
         return Err(anyhow::anyhow!("Failed to download subtitle file"));
     }
 
     let content = file_response.text().await?;
-    tracing::info!(file_id = file_id, content_len = content.len(), "opensub: file downloaded");
     Ok(content)
 }
