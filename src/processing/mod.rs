@@ -6,3 +6,5 @@ pub mod transcription;
 pub mod lemma_dict;
 pub mod normalization;
 pub mod furigana;
+pub mod encryption;
+pub mod subtitles;

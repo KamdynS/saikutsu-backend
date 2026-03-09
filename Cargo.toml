@@ -40,8 +40,13 @@ regex = "1"
 once_cell = "1.20"
 unicode-normalization = "0.1"
 
-# HTTP client (OpenAI transcription API)
+# HTTP client (OpenAI transcription API + subtitle APIs)
 reqwest = { version = "0.13", features = ["json", "multipart"] }
+urlencoding = "2"
+
+# Encryption (user API key storage)
+aes-gcm = "0.10"
+base64 = "0.22"
 
 # Anki export
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }

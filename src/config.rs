@@ -8,6 +8,8 @@ pub struct Config {
     pub supabase_url: Option<String>,
     pub allowed_origins: Vec<String>,
     pub openai_api_key: Option<String>,
+    pub opensubtitles_api_key: Option<String>,
+    pub encryption_key: Option<String>,
 }
 
 impl Config {
@@ -39,6 +41,8 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect(),
             openai_api_key: env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()),
+            opensubtitles_api_key: env::var("OPENSUBTITLES_API_KEY").ok().filter(|s| !s.is_empty()),
+            encryption_key: env::var("ENCRYPTION_KEY").ok().filter(|s| !s.is_empty()),
         })
     }
 }

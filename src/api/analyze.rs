@@ -170,7 +170,7 @@ fn split_sentences_european(text: &str) -> Vec<String> {
 /// Tokenizes text only ONCE and maps tokens to sentences by substring matching,
 /// avoiding expensive per-sentence re-tokenization.
 #[allow(clippy::type_complexity)]
-fn analyze_text_core(
+pub fn analyze_text_core(
     full_text: &str,
     language: &str,
 ) -> Result<(Vec<Token>, Vec<String>, HashMap<String, Vec<String>>, HashMap<String, String>, HashMap<String, Vec<String>>, HashMap<String, HashSet<String>>), AppError> {
@@ -1004,11 +1004,11 @@ async fn update_deck_descriptions(
     Ok(updated)
 }
 
-struct CardCreationResult {
-    cards_created: usize,
-    sentences_created: usize,
-    i_plus_one_found: usize,
-    words_skipped_duplicate: usize,
+pub struct CardCreationResult {
+    pub cards_created: usize,
+    pub sentences_created: usize,
+    pub i_plus_one_found: usize,
+    pub words_skipped_duplicate: usize,
 }
 
 /// Shared logic for creating cards from analyzed text.
@@ -1016,7 +1016,7 @@ struct CardCreationResult {
 /// When both deck types are selected, `cloze_deck` and `def_deck` are separate decks.
 /// When only one type is selected, only the relevant deck is Some.
 #[allow(clippy::too_many_arguments)]
-async fn create_cards_from_analysis(
+pub async fn create_cards_from_analysis(
     state: &Arc<AppState>,
     auth_user: &AuthUser,
     cloze_deck: Option<&Deck>,

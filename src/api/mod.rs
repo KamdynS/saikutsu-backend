@@ -6,4 +6,6 @@ pub mod exports;
 pub mod imports;
 pub mod middleware;
 pub mod reviews;
+pub mod settings;
+pub mod subtitles;
 pub mod waitlist;

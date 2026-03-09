@@ -2,7 +2,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{header, Method},
     middleware,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use std::sync::Arc;
@@ -105,6 +105,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/decks/from-pdf", post(api::analyze::create_deck_from_pdf))
         .route("/v1/decks/from-text", post(api::analyze::create_deck_from_text))
         .route("/v1/decks/from-media", post(api::analyze::create_deck_from_media))
+        // Subtitle routes
+        .route("/v1/subtitles/search", post(api::subtitles::search))
+        .route("/v1/subtitles/files", post(api::subtitles::list_files))
+        .route("/v1/decks/from-subtitles", post(api::subtitles::create_deck_from_subtitles))
+        // Settings routes
+        .route("/v1/settings/api-keys", get(api::settings::list_api_keys))
+        .route("/v1/settings/api-keys/{provider}", put(api::settings::set_api_key))
+        .route("/v1/settings/api-keys/{provider}", delete(api::settings::delete_api_key))
         .layer(DefaultBodyLimit::max(500 * 1024 * 1024)) // 500MB for video uploads
         .layer(middleware::from_fn_with_state(
             state.clone(),
