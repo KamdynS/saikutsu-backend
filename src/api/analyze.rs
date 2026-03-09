@@ -174,13 +174,19 @@ fn analyze_text_core(
     full_text: &str,
     language: &str,
 ) -> Result<(Vec<Token>, Vec<String>, HashMap<String, Vec<String>>, HashMap<String, String>, HashMap<String, Vec<String>>, HashMap<String, HashSet<String>>), AppError> {
+    let text = if language == "ja" {
+        std::borrow::Cow::Owned(crate::processing::furigana::strip_furigana(full_text))
+    } else {
+        std::borrow::Cow::Borrowed(full_text)
+    };
+
     let step_start = Instant::now();
-    let sentences = split_sentences(full_text, language);
+    let sentences = split_sentences(&text, language);
     tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, sentences = sentences.len(), "analyze_text_core split_sentences");
 
     // Tokenize full text only ONCE (was previously tokenized again per-sentence)
     let step_start = Instant::now();
-    let all_tokens = tokenize_text(full_text, language)?;
+    let all_tokens = tokenize_text(&text, language)?;
     tracing::info!(duration_ms = step_start.elapsed().as_millis() as u64, tokens = all_tokens.len(), "analyze_text_core tokenize full text");
 
     // Build surface form and POS mappings (normalized lemma keys)
