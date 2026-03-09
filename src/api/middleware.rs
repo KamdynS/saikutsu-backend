@@ -7,9 +7,13 @@ use axum::{
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use crate::{error::AppError, AppState};
+use crate::{error::AppError, AppState, JwksCache};
+
+/// JWKS cache TTL — keys are refreshed after this duration
+const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -98,11 +102,43 @@ pub async fn auth_middleware(
             })?;
 
             let jwks_url = format!("{}/auth/v1/.well-known/jwks.json", supabase_url.trim_end_matches('/'));
-            let keys = state.jwks_keys.get_or_try_init(|| async {
-                tracing::info!("Fetching JWKS from {}", jwks_url);
-                fetch_jwks_keys(&jwks_url).await
-            }).await.map_err(|e| {
-                tracing::error!("Failed to fetch JWKS: {}", e);
+
+            // Read cached keys; if missing or expired, fetch new ones
+            {
+                let cache = state.jwks_cache.read().await;
+                if cache.is_none() {
+                    drop(cache);
+                    // First fetch — must block
+                    tracing::info!("Fetching JWKS from {}", jwks_url);
+                    let new_keys = fetch_jwks_keys(&jwks_url).await.map_err(|e| {
+                        tracing::error!("Failed to fetch JWKS: {}", e);
+                        AppError::Unauthorized
+                    })?;
+                    let mut w = state.jwks_cache.write().await;
+                    *w = Some(JwksCache { keys: new_keys, fetched_at: Instant::now() });
+                } else if cache.as_ref().unwrap().fetched_at.elapsed() > JWKS_CACHE_TTL {
+                    // Cache expired — spawn background refresh, use stale keys for this request
+                    let url = jwks_url.clone();
+                    let state_clone = state.clone();
+                    tokio::spawn(async move {
+                        tracing::info!("Refreshing JWKS in background from {}", url);
+                        match fetch_jwks_keys(&url).await {
+                            Ok(new_keys) => {
+                                let mut w = state_clone.jwks_cache.write().await;
+                                *w = Some(JwksCache { keys: new_keys, fetched_at: Instant::now() });
+                                tracing::info!("JWKS background refresh succeeded");
+                            }
+                            Err(e) => {
+                                tracing::warn!("JWKS background refresh failed: {}", e);
+                            }
+                        }
+                    });
+                }
+            }
+
+            let cache = state.jwks_cache.read().await;
+            let keys = cache.as_ref().map(|c| &c.keys).ok_or_else(|| {
+                tracing::error!("No JWKS keys available for ES256 validation");
                 AppError::Unauthorized
             })?;
 
@@ -131,7 +167,7 @@ pub async fn auth_middleware(
                 })?
                 .claims
         }
-        _ => {
+        Algorithm::HS256 => {
             let secret = &state.config.supabase_jwt_secret;
             if secret.is_empty() {
                 tracing::error!("SUPABASE_JWT_SECRET is not configured for HS256");
@@ -151,6 +187,10 @@ pub async fn auth_middleware(
                 AppError::Unauthorized
             })?
             .claims
+        }
+        other => {
+            tracing::debug!("Unsupported JWT algorithm: {:?}", other);
+            return Err(AppError::Unauthorized);
         }
     };
 

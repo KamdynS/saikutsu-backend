@@ -128,7 +128,7 @@ pub async fn update(
         r#"
         UPDATE decks
         SET name = $1, description = $2, settings = $3, updated_at = NOW()
-        WHERE id = $4
+        WHERE id = $4 AND user_id = $5
         RETURNING *
         "#,
     )
@@ -136,6 +136,7 @@ pub async fn update(
     .bind(&description)
     .bind(&settings)
     .bind(id)
+    .bind(auth_user.user_id)
     .fetch_one(&state.db)
     .await?;
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "decks::update db update");

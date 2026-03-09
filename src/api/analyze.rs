@@ -1043,7 +1043,7 @@ async fn create_cards_from_analysis(
     );
     // Log a sample of known lemmas so we can verify normalization
     let sample_known: Vec<&str> = existing_lemmas.iter().take(20).map(|s| s.as_str()).collect();
-    tracing::info!(sample = ?sample_known, "dedup: sample of existing known lemmas");
+    tracing::debug!(sample = ?sample_known, "dedup: sample of existing known lemmas");
 
     let want_word_def = deck_types.contains(&DeckType::WordDefinition);
     let want_i_plus_one = deck_types.contains(&DeckType::IPlusOne);
@@ -1065,7 +1065,7 @@ async fn create_cards_from_analysis(
             "dedup: i+1 new_lemmas built (words in text minus known)"
         );
         let sample_new: Vec<&&str> = new_lemmas.iter().take(15).collect();
-        tracing::info!(sample = ?sample_new, "dedup: sample of new lemmas for i+1");
+        tracing::debug!(sample = ?sample_new, "dedup: sample of new lemmas for i+1");
 
         let mut i1_skipped_all_known = 0usize;
         let mut i1_skipped_multiple_unknown = 0usize;
@@ -1079,7 +1079,7 @@ async fn create_cards_from_analysis(
                 i1_skipped_all_known += 1;
             } else if unknown_lemmas.len() > 1 {
                 i1_skipped_multiple_unknown += 1;
-                tracing::info!(
+                tracing::debug!(
                     unknown_count = unknown_lemmas.len(),
                     unknowns = ?unknown_lemmas,
                     sentence_preview = &sentence[..sentence.len().min(80)],
@@ -1156,7 +1156,7 @@ async fn create_cards_from_analysis(
         // Log every lemma being inserted so we can cross-check against known_words
         for (i, chunk) in card_data_list.chunks(50).enumerate() {
             let lemmas_chunk: Vec<&str> = chunk.iter().map(|c| c.lemma.as_str()).collect();
-            tracing::info!(
+            tracing::debug!(
                 batch = i,
                 count = chunk.len(),
                 lemmas = ?lemmas_chunk,
@@ -1313,11 +1313,11 @@ async fn create_cards_from_analysis(
 
         if is_japanese(language) && definitions.is_empty() {
             words_skipped_no_dict += 1;
-            tracing::info!(lemma = lemma, "dedup: skipped — no dictionary entry (ja)");
+            tracing::debug!(lemma = lemma, "dedup: skipped — no dictionary entry (ja)");
             continue;
         }
 
-        tracing::info!(
+        tracing::debug!(
             rank = rank + 1,
             lemma = lemma,
             doc_freq = count,
@@ -1349,7 +1349,7 @@ async fn create_cards_from_analysis(
     if !skipped_lemmas.is_empty() {
         // Chunk skipped lemmas to avoid huge log lines
         for (i, chunk) in skipped_lemmas.chunks(50).enumerate() {
-            tracing::info!(
+            tracing::debug!(
                 batch = i,
                 count = chunk.len(),
                 lemmas = ?chunk,

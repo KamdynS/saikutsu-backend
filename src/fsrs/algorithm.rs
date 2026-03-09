@@ -37,6 +37,7 @@ pub struct Card {
     pub difficulty: f64,
     pub stability: f64,
     pub due: Option<NaiveDate>,
+    pub last_review: Option<NaiveDate>,
     pub reps: i32,
     pub lapses: i32,
 }
@@ -98,6 +99,7 @@ impl FSRS {
             difficulty,
             stability,
             due,
+            last_review: Some(today),
             reps: 1,
             lapses: 0,
         }
@@ -105,8 +107,8 @@ impl FSRS {
 
     fn review_review(&self, card: &Card, rating: Rating, today: NaiveDate) -> Card {
         let elapsed = card
-            .due
-            .map(|d| (today - d).num_days().max(0) as f64)
+            .last_review
+            .map(|lr| (today - lr).num_days().max(0) as f64)
             .unwrap_or(0.0);
 
         let retrievability = self.retrievability(card.stability, elapsed as i32);
@@ -120,6 +122,7 @@ impl FSRS {
                 difficulty,
                 stability,
                 due: Some(today),
+                last_review: Some(today),
                 reps: card.reps + 1,
                 lapses: card.lapses + 1,
             }
@@ -133,6 +136,7 @@ impl FSRS {
                 difficulty,
                 stability,
                 due: Some(today + Duration::days(interval as i64)),
+                last_review: Some(today),
                 reps: card.reps + 1,
                 lapses: card.lapses,
             }
@@ -144,6 +148,7 @@ impl FSRS {
             Card {
                 state: State::Learning,
                 due: Some(today),
+                last_review: Some(today),
                 reps: card.reps + 1,
                 ..card.clone()
             }
@@ -155,6 +160,7 @@ impl FSRS {
                 state: State::Review,
                 stability,
                 due: Some(today + Duration::days(interval as i64)),
+                last_review: Some(today),
                 reps: card.reps + 1,
                 ..card.clone()
             }
@@ -166,6 +172,7 @@ impl FSRS {
             Card {
                 state: State::Relearning,
                 due: Some(today),
+                last_review: Some(today),
                 reps: card.reps + 1,
                 ..card.clone()
             }
@@ -177,6 +184,7 @@ impl FSRS {
                 state: State::Review,
                 stability,
                 due: Some(today + Duration::days(interval as i64)),
+                last_review: Some(today),
                 reps: card.reps + 1,
                 ..card.clone()
             }
@@ -219,9 +227,9 @@ impl FSRS {
         let s = card.stability;
         let d = card.difficulty;
 
-        let new_s = self.params.w[12]
-            * d.powf(-self.params.w[13])
-            * ((s + 1.0).powf(self.params.w[14]) - 1.0);
+        let new_s = self.params.w[11]
+            * d.powf(-self.params.w[12])
+            * ((s + 1.0).powf(self.params.w[13]) - 1.0);
 
         new_s.clamp(0.1, s)
     }
@@ -254,6 +262,7 @@ mod tests {
             difficulty: 0.0,
             stability: 0.0,
             due: None,
+            last_review: None,
             reps: 0,
             lapses: 0,
         };
@@ -274,6 +283,7 @@ mod tests {
             difficulty: 0.0,
             stability: 0.0,
             due: None,
+            last_review: None,
             reps: 0,
             lapses: 0,
         };

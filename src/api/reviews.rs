@@ -250,6 +250,7 @@ pub async fn submit(
         difficulty: card_state.difficulty as f64,
         stability: card_state.stability as f64,
         due: card_state.due_date,
+        last_review: card_state.last_review.map(|dt| dt.date_naive()),
         reps: card_state.reps,
         lapses: card_state.lapses,
     };
@@ -362,6 +363,7 @@ struct CardStateRow {
     difficulty: f32,
     stability: f32,
     due_date: Option<NaiveDate>,
+    last_review: Option<chrono::DateTime<chrono::Utc>>,
     reps: i32,
     lapses: i32,
 }

@@ -12,7 +12,7 @@ pub fn normalize_lemma(lemma: &str, language: &str) -> String {
     };
     // Log when normalization actually changes the input (accent/case differences)
     if result != lemma {
-        tracing::info!(
+        tracing::debug!(
             original = lemma,
             normalized = result,
             nfc_changed = nfc != lemma,

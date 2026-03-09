@@ -154,7 +154,7 @@ pub async fn process_pdf(
     }
 
     // Store processed data
-    PROCESSED_UPLOADS.lock().unwrap().insert(upload_id, ProcessedUpload {
+    PROCESSED_UPLOADS.lock().unwrap_or_else(|e| e.into_inner()).insert(upload_id, ProcessedUpload {
         words: processed_words,
         sentences,
     });
@@ -191,7 +191,7 @@ pub async fn get_upload_preview(pool: &PgPool, upload_id: Uuid, user_id: Uuid) -
         return Err(AppError::BadRequest("Upload not yet processed".to_string()));
     }
 
-    let processed = PROCESSED_UPLOADS.lock().unwrap()
+    let processed = PROCESSED_UPLOADS.lock().unwrap_or_else(|e| e.into_inner())
         .get(&upload_id)
         .cloned()
         .ok_or_else(|| AppError::NotFound("Processed data not found".to_string()))?;
@@ -232,7 +232,7 @@ pub async fn finalize_upload(
         return Err(AppError::BadRequest("Upload not yet processed".to_string()));
     }
 
-    let processed = PROCESSED_UPLOADS.lock().unwrap()
+    let processed = PROCESSED_UPLOADS.lock().unwrap_or_else(|e| e.into_inner())
         .get(&upload_id)
         .cloned()
         .ok_or_else(|| AppError::NotFound("Processed data not found".to_string()))?;
@@ -331,7 +331,7 @@ pub async fn finalize_upload(
         .await?;
 
     // Clean up processed data
-    PROCESSED_UPLOADS.lock().unwrap().remove(&upload_id);
+    PROCESSED_UPLOADS.lock().unwrap_or_else(|e| e.into_inner()).remove(&upload_id);
 
     Ok(deck.id)
 }

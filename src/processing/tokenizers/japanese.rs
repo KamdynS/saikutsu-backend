@@ -97,12 +97,12 @@ impl JapaneseTokenizer {
 
     fn katakana_to_hiragana(text: &str) -> String {
         text.chars()
-            .map(|c| {
-                if ('ァ'..='ン').contains(&c) {
-                    char::from_u32(c as u32 - 0x60).unwrap_or(c)
-                } else {
-                    c
-                }
+            .map(|c| match c {
+                'ヴ' => 'ゔ',       // U+30F4 → U+3094
+                'ヵ' => 'か',       // U+30F5 → か
+                'ヶ' => 'け',       // U+30F6 → け
+                'ァ'..='ン' => char::from_u32(c as u32 - 0x60).unwrap_or(c),
+                _ => c,
             })
             .collect()
     }

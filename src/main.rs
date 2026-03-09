@@ -1,11 +1,12 @@
 use axum::{
     extract::DefaultBodyLimit,
+    http::{header, Method},
     middleware,
     routing::{delete, get, patch, post},
     Router,
 };
 use std::sync::Arc;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use saikutsu::{api, config::Config, db, processing::{dictionary, lemma_dict}, AppState};
@@ -43,15 +44,28 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         db: pool,
         config: config.clone(),
-        jwks_keys: tokio::sync::OnceCell::new(),
+        jwks_cache: tokio::sync::RwLock::new(None),
     });
 
     // Build CORS layer
+    let allowed_methods = vec![
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
+    let allowed_headers = vec![
+        header::AUTHORIZATION,
+        header::CONTENT_TYPE,
+    ];
+
     let cors = if config.allowed_origins.is_empty() {
         CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
+            .allow_origin(AllowOrigin::any())
+            .allow_methods(allowed_methods)
+            .allow_headers(allowed_headers)
     } else {
         let origins: Vec<_> = config
             .allowed_origins
@@ -60,8 +74,8 @@ async fn main() -> anyhow::Result<()> {
             .collect();
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
-            .allow_methods(Any)
-            .allow_headers(Any)
+            .allow_methods(allowed_methods)
+            .allow_headers(allowed_headers)
     };
 
     // Protected routes (require auth)
@@ -98,13 +112,15 @@ async fn main() -> anyhow::Result<()> {
         ));
 
     // Public routes
+    // TODO: Add rate limiting to public analyze endpoints to prevent abuse
     let public = Router::new()
         .route("/health", get(health_check))
         // Analysis endpoints (stateless, no user data)
         .route("/v1/analyze", post(api::analyze::analyze_pdf))
         .route("/v1/analyze/text", post(api::analyze::analyze_text))
         // Waitlist (public, no auth)
-        .route("/v1/waitlist", post(api::waitlist::join_waitlist));
+        .route("/v1/waitlist", post(api::waitlist::join_waitlist))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)); // 2MB limit for public endpoints
 
     let app = Router::new()
         .merge(public)

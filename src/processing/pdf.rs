@@ -1,4 +1,10 @@
 use std::path::Path;
+use std::sync::LazyLock;
+
+static RE_WHITESPACE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"[ \t]+").unwrap());
+static RE_HYPHEN_BREAK: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(\w)-\s*\n\s*(\w)").unwrap());
 
 #[derive(Debug)]
 pub struct ExtractedPage {
@@ -27,11 +33,8 @@ pub fn extract_text_from_bytes(
 }
 
 fn clean_text(text: &str) -> String {
-    let re = regex::Regex::new(r"[ \t]+").unwrap();
-    let text = re.replace_all(text, " ");
-
-    let re = regex::Regex::new(r"(\w)-\s*\n\s*(\w)").unwrap();
-    let text = re.replace_all(&text, "$1$2");
+    let text = RE_WHITESPACE.replace_all(text, " ");
+    let text = RE_HYPHEN_BREAK.replace_all(&text, "$1$2");
 
     text.replace("\r\n", "\n").replace('\r', "\n")
 }

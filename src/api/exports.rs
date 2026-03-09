@@ -70,7 +70,7 @@ pub async fn export_apkg(
 
     tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "exports::export_apkg total");
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(
@@ -78,12 +78,22 @@ pub async fn export_apkg(
             format!("attachment; filename=\"{}\"", filename),
         )
         .body(Body::from(apkg_bytes))
-        .unwrap())
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to build response: {}", e)))
 }
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+        .map(|c| {
+            // Strip double quotes explicitly to prevent Content-Disposition header injection,
+            // and replace other non-safe characters with underscore
+            if c == '"' {
+                '_'
+            } else if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim()
         .to_string()
