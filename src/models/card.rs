@@ -81,9 +81,9 @@ impl From<Sentence> for SentenceResponse {
 pub struct UpdateCardRequest {
     pub lemma: Option<String>,
     pub definition: Option<String>,
-    pub reading: Option<Option<String>>,
-    pub part_of_speech: Option<Option<String>>,
-    pub notes: Option<Option<String>>,
+    pub reading: Option<String>,
+    pub part_of_speech: Option<String>,
+    pub notes: Option<String>,
     pub tags: Option<Vec<String>>,
 }
 

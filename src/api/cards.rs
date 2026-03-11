@@ -294,11 +294,14 @@ pub async fn update(
     .ok_or(AppError::NotFound("Card not found".to_string()))?;
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::update ownership check");
 
+    // Frontend always sends all fields — present values are kept, cleared fields are null.
+    // For required fields (lemma, definition), fall back to existing if absent.
     let lemma = req.lemma.unwrap_or(card.lemma);
     let definition = req.definition.unwrap_or(card.definition);
-    let reading = req.reading.unwrap_or(card.reading);
-    let part_of_speech = req.part_of_speech.unwrap_or(card.part_of_speech);
-    let notes = req.notes.unwrap_or(card.notes);
+    // For optional fields, always overwrite (null = clear the field).
+    let reading = req.reading;
+    let part_of_speech = req.part_of_speech;
+    let notes = req.notes;
     let tags = req.tags.unwrap_or(card.tags);
 
     let db_start = Instant::now();
