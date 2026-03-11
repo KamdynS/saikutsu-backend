@@ -181,6 +181,7 @@ pub async fn import_apkg(
 
     let mut apkg_bytes: Option<Vec<u8>> = None;
     let mut mapping_json: Option<String> = None;
+    let mut user_language: Option<String> = None;
 
     let upload_start = Instant::now();
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -195,6 +196,11 @@ pub async fn import_apkg(
                 let text = field.text().await
                     .map_err(|e| AppError::BadRequest(format!("Failed to read mapping: {}", e)))?;
                 mapping_json = Some(text);
+            }
+            Some("language") => {
+                let text = field.text().await
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read language: {}", e)))?;
+                user_language = Some(text);
             }
             _ => {}
         }
@@ -226,12 +232,12 @@ pub async fn import_apkg(
         return Err(AppError::BadRequest("No notes found in Anki deck".to_string()));
     }
 
-    // Auto-detect language from card content
+    // Auto-detect language from lemmas only (definitions are usually English, which skews detection)
     let sample_text: String = cards.iter()
-        .take(20)
-        .flat_map(|c| [c.lemma.as_str(), " ", c.definition.as_str(), " "])
+        .take(50)
+        .flat_map(|c| [c.lemma.as_str(), " "])
         .collect();
-    let language = analyze::detect_language(&sample_text, None);
+    let language = analyze::detect_language(&sample_text, user_language.as_deref());
 
     // Create deck
     let db_start = Instant::now();
