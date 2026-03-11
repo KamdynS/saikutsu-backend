@@ -152,16 +152,44 @@ pub async fn delete(
 ) -> AppResult<Json<serde_json::Value>> {
     let start = Instant::now();
 
+    // Collect lemmas and language before deletion so we can clean up known_words
+    let deck_info: Option<(String,)> = sqlx::query_as(
+        "SELECT language FROM decks WHERE id = $1 AND user_id = $2",
+    )
+    .bind(id)
+    .bind(auth_user.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let language = match deck_info {
+        Some((lang,)) => lang,
+        None => return Err(AppError::NotFound("Deck not found".to_string())),
+    };
+
+    let lemmas: Vec<String> = sqlx::query_scalar(
+        "SELECT lemma FROM cards WHERE deck_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+
     let db_start = Instant::now();
-    let result = sqlx::query("DELETE FROM decks WHERE id = $1 AND user_id = $2")
+    sqlx::query("DELETE FROM decks WHERE id = $1 AND user_id = $2")
         .bind(id)
         .bind(auth_user.user_id)
         .execute(&state.db)
         .await?;
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "decks::delete db query");
 
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("Deck not found".to_string()));
+    // Remove lemmas from known_words if they don't exist in any other deck
+    if !lemmas.is_empty() {
+        crate::services::known_words_service::remove_orphaned_known_words(
+            &state.db,
+            auth_user.user_id,
+            &language,
+            &lemmas,
+        )
+        .await?;
     }
 
     tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "decks::delete total");

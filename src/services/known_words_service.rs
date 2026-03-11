@@ -33,6 +33,41 @@ pub async fn add_known_words(
     Ok(())
 }
 
+/// Remove lemmas from known_words, but only if they don't appear in any
+/// other deck for this user+language.
+pub async fn remove_orphaned_known_words(
+    pool: &PgPool,
+    user_id: Uuid,
+    language: &str,
+    lemmas: &[String],
+) -> AppResult<()> {
+    if lemmas.is_empty() {
+        return Ok(());
+    }
+
+    // Delete from known_words where the lemma doesn't exist in any remaining card
+    sqlx::query(
+        r#"
+        DELETE FROM known_words kw
+        WHERE kw.user_id = $1
+          AND kw.language = $2
+          AND kw.lemma = ANY($3::text[])
+          AND NOT EXISTS (
+            SELECT 1 FROM cards c
+            JOIN decks d ON c.deck_id = d.id
+            WHERE d.user_id = $1 AND d.language = $2 AND c.lemma = kw.lemma
+          )
+        "#,
+    )
+    .bind(user_id)
+    .bind(language)
+    .bind(lemmas)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// Fetch all known lemmas for a user in a given language.
 pub async fn get_known_lemmas(
     pool: &PgPool,
