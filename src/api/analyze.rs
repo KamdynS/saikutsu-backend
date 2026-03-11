@@ -1136,7 +1136,8 @@ pub async fn create_cards_from_analysis(
     let mut word_data_list: Vec<WordData> = Vec::new();
 
     for (rank, (lemma, count)) in words.iter().enumerate() {
-        if existing_lemmas.contains(lemma) {
+        let normalized = normalize_lemma(lemma, language);
+        if existing_lemmas.contains(&normalized) {
             words_skipped_duplicate += 1;
             continue;
         }

@@ -304,11 +304,8 @@ pub async fn finalize_upload(
         }
     }
 
-    // Add created lemmas to known_words
-    let normalized_lemmas: Vec<String> = words_to_add.iter()
-        .map(|w| normalize_lemma(&w.lemma, &upload.language))
-        .collect();
-    let lemma_refs: Vec<&str> = normalized_lemmas.iter().map(|s| s.as_str()).collect();
+    // Add created lemmas to known_words (service handles normalization)
+    let lemma_refs: Vec<&str> = words_to_add.iter().map(|w| w.lemma.as_str()).collect();
     known_words_service::add_known_words(pool, user_id, &upload.language, &lemma_refs).await?;
 
     // Update upload with deck_id

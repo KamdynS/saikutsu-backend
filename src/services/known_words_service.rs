@@ -4,8 +4,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::AppResult;
+use crate::processing::normalization::normalize_lemma;
 
 /// Batch-insert lemmas into known_words for a user+language.
+/// Normalizes all lemmas (NFC + lowercase for non-Japanese) before inserting.
 /// Uses ON CONFLICT DO NOTHING so duplicates are silently skipped.
 pub async fn add_known_words(
     pool: &PgPool,
@@ -17,6 +19,9 @@ pub async fn add_known_words(
         return Ok(());
     }
 
+    let normalized: Vec<String> = lemmas.iter().map(|l| normalize_lemma(l, language)).collect();
+    let refs: Vec<&str> = normalized.iter().map(|s| s.as_str()).collect();
+
     sqlx::query(
         r#"
         INSERT INTO known_words (user_id, language, lemma)
@@ -26,7 +31,7 @@ pub async fn add_known_words(
     )
     .bind(user_id)
     .bind(language)
-    .bind(lemmas)
+    .bind(&refs)
     .execute(pool)
     .await?;
 
@@ -35,6 +40,7 @@ pub async fn add_known_words(
 
 /// Remove lemmas from known_words, but only if they don't appear in any
 /// other deck for this user+language.
+/// Normalizes lemmas before matching against known_words entries.
 pub async fn remove_orphaned_known_words(
     pool: &PgPool,
     user_id: Uuid,
@@ -45,7 +51,10 @@ pub async fn remove_orphaned_known_words(
         return Ok(());
     }
 
-    // Delete from known_words where the lemma doesn't exist in any remaining card
+    let normalized: Vec<String> = lemmas.iter().map(|l| normalize_lemma(l, language)).collect();
+
+    // Delete from known_words where the normalized lemma doesn't exist in any remaining card.
+    // We also normalize card lemmas in the NOT EXISTS check for consistent comparison.
     sqlx::query(
         r#"
         DELETE FROM known_words kw
@@ -61,7 +70,7 @@ pub async fn remove_orphaned_known_words(
     )
     .bind(user_id)
     .bind(language)
-    .bind(lemmas)
+    .bind(&normalized)
     .execute(pool)
     .await?;
 
@@ -69,6 +78,7 @@ pub async fn remove_orphaned_known_words(
 }
 
 /// Fetch all known lemmas for a user in a given language.
+/// Returns normalized forms for consistent comparison.
 pub async fn get_known_lemmas(
     pool: &PgPool,
     user_id: Uuid,
@@ -82,5 +92,6 @@ pub async fn get_known_lemmas(
     .fetch_all(pool)
     .await?;
 
-    Ok(lemmas.into_iter().collect())
+    // Normalize in case there are legacy entries stored without normalization
+    Ok(lemmas.into_iter().map(|l| normalize_lemma(&l, language)).collect())
 }

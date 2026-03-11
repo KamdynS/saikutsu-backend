@@ -15,7 +15,6 @@ use crate::{
     api::middleware::AuthUser,
     error::{AppError, AppResult},
     models::{Deck, DeckResponse},
-    processing::normalization::normalize_lemma,
     services::known_words_service,
     AppState,
 };
@@ -262,7 +261,7 @@ pub async fn import_apkg(
     let db_start = Instant::now();
     let mut cards_created = 0usize;
     let mut sentences_created = 0usize;
-    let mut normalized_lemmas: Vec<String> = Vec::with_capacity(cards.len());
+    let mut raw_lemmas: Vec<&str> = Vec::with_capacity(cards.len());
 
     for card in &cards {
         let card_id = sqlx::query_scalar::<_, uuid::Uuid>(
@@ -302,14 +301,13 @@ pub async fn import_apkg(
             }
         }
 
-        normalized_lemmas.push(normalize_lemma(&card.lemma, &language));
+        raw_lemmas.push(card.lemma.as_str());
     }
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, cards = cards_created, sentences = sentences_created, "imports::import_apkg insert cards+sentences");
 
-    // Add imported lemmas to known_words
+    // Add imported lemmas to known_words (service handles normalization)
     let db_start = Instant::now();
-    let lemma_refs: Vec<&str> = normalized_lemmas.iter().map(|s| s.as_str()).collect();
-    known_words_service::add_known_words(&state.db, auth_user.user_id, &language, &lemma_refs).await?;
+    known_words_service::add_known_words(&state.db, auth_user.user_id, &language, &raw_lemmas).await?;
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "imports::import_apkg add known_words");
 
     // Update deck card count

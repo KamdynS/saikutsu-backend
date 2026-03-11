@@ -15,7 +15,6 @@ use crate::{
         Card, CardListResponse, CardResponse, CreateCardRequest, CreateSentenceRequest, Sentence,
         SentenceResponse, UpdateCardRequest, UpdateSentenceRequest,
     },
-    processing::normalization::normalize_lemma,
     services::known_words_service,
     AppState,
 };
@@ -205,10 +204,9 @@ pub async fn create(
     .await?;
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::create insert card");
 
-    // Add lemma to known_words
+    // Add lemma to known_words (service handles normalization)
     let db_start = Instant::now();
-    let norm = normalize_lemma(&req.lemma, &deck_language);
-    known_words_service::add_known_words(&state.db, auth_user.user_id, &deck_language, &[norm.as_str()]).await?;
+    known_words_service::add_known_words(&state.db, auth_user.user_id, &deck_language, &[req.lemma.as_str()]).await?;
     tracing::info!(duration_ms = db_start.elapsed().as_millis() as u64, "cards::create add known_words");
 
     // If a sentence was provided, create it
