@@ -43,6 +43,7 @@ pub struct CardResponse {
     pub definition: String,
     pub part_of_speech: Option<String>,
     pub frequency_rank: Option<i32>,
+    pub doc_frequency: Option<i32>,
     pub audio_url: Option<String>,
     pub notes: Option<String>,
     pub tags: Vec<String>,
@@ -78,7 +79,11 @@ impl From<Sentence> for SentenceResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateCardRequest {
-    pub notes: Option<String>,
+    pub lemma: Option<String>,
+    pub definition: Option<String>,
+    pub reading: Option<Option<String>>,
+    pub part_of_speech: Option<Option<String>>,
+    pub notes: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
 }
 
@@ -89,6 +94,25 @@ pub struct CreateCardRequest {
     pub reading: Option<String>,
     pub part_of_speech: Option<String>,
     pub sentence: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSentenceRequest {
+    pub text: String,
+    pub cloze_text: String,
+    pub cloze_answer: String,
+    pub surface_form: Option<String>,
+    pub source_page: Option<i32>,
+    pub is_primary: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSentenceRequest {
+    pub text: Option<String>,
+    pub cloze_text: Option<String>,
+    pub cloze_answer: Option<String>,
+    pub surface_form: Option<String>,
+    pub is_primary: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
