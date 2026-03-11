@@ -464,15 +464,19 @@ async fn run_subtitle_job(
     ).await
     .map_err(|e| anyhow::anyhow!("Card creation failed: {}", e))?;
 
-    // Update deck descriptions
+    // Update deck descriptions with actual per-deck card counts
     let skipped = result.words_skipped_duplicate;
-    let new_words = result.cards_created;
-    let desc = if skipped > 0 {
-        format!("{} new words from subtitles ({} already known)", new_words, skipped)
-    } else {
-        format!("{} words from subtitles", new_words)
-    };
     for deck in &created_decks {
+        let card_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cards WHERE deck_id = $1")
+            .bind(deck.id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+        let desc = if skipped > 0 {
+            format!("{} new words from subtitles ({} already known)", card_count, skipped)
+        } else {
+            format!("{} words from subtitles", card_count)
+        };
         let _ = sqlx::query("UPDATE decks SET description = $1 WHERE id = $2")
             .bind(&desc)
             .bind(deck.id)

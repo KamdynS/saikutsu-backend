@@ -918,14 +918,27 @@ pub async fn create_deck_from_media(
 async fn update_deck_descriptions(
     db: &sqlx::PgPool,
     decks: &[Deck],
-    description: &str,
+    description_template: &str,
 ) -> AppResult<Vec<Deck>> {
     let mut updated = Vec::with_capacity(decks.len());
     for deck in decks {
+        // Use actual per-deck card count instead of combined total
+        let card_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cards WHERE deck_id = $1")
+            .bind(deck.id)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
+        // Replace the leading number in the template with the actual per-deck count
+        let rest = description_template.trim_start_matches(|c: char| c.is_ascii_digit());
+        let desc = if rest.len() < description_template.len() {
+            format!("{}{}", card_count, rest)
+        } else {
+            description_template.to_string()
+        };
         let d = sqlx::query_as::<_, Deck>(
             "UPDATE decks SET description = $1 WHERE id = $2 RETURNING *",
         )
-        .bind(description)
+        .bind(&desc)
         .bind(deck.id)
         .fetch_one(db)
         .await?;
