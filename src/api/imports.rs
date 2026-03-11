@@ -92,17 +92,18 @@ fn preview_anki_db(sqlite_bytes: &[u8]) -> anyhow::Result<(String, Vec<String>, 
     // Count total notes
     let total_notes: usize = conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
 
-    // Get sample notes (first 3) for the primary model
+    // Get sample notes from the middle of the deck (first cards are often intros)
+    let offset = if total_notes > 6 { total_notes / 2 - 1 } else { 0 };
     let sample_notes: Vec<Vec<String>> = {
-        let mut stmt = conn.prepare("SELECT flds FROM notes WHERE mid = ?1 LIMIT 3")?;
-        let rows: Vec<String> = stmt.query_map([primary_mid], |row| row.get(0))?
+        let mut stmt = conn.prepare("SELECT flds FROM notes WHERE mid = ?1 LIMIT 3 OFFSET ?2")?;
+        let rows: Vec<String> = stmt.query_map(rusqlite::params![primary_mid, offset], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
 
         // If no notes matched the primary model, try without filter
         let rows = if rows.is_empty() {
-            let mut stmt2 = conn.prepare("SELECT flds FROM notes LIMIT 3")?;
-            let fallback: Vec<String> = stmt2.query_map([], |row| row.get::<_, String>(0))?
+            let mut stmt2 = conn.prepare("SELECT flds FROM notes LIMIT 3 OFFSET ?1")?;
+            let fallback: Vec<String> = stmt2.query_map([offset], |row| row.get::<_, String>(0))?
                 .filter_map(|r| r.ok())
                 .collect();
             fallback
