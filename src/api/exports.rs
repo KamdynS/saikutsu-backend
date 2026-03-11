@@ -391,13 +391,17 @@ fn populate_cards_and_notes(
         let note_id = now * 1000 + i as i64;
         let card_id_int = note_id + 1;
 
-        // Build front: cloze sentence or just the word
+        // Build front: sentence with target word bolded, or just the word
         let card_sentences = sentences_by_card.get(&card.id);
         let front = if let Some(sents) = card_sentences {
-            if let Some(primary) = sents.iter().find(|s| s.is_primary) {
-                primary.cloze_text.clone()
-            } else if let Some(first) = sents.first() {
-                first.cloze_text.clone()
+            let sentence = sents.iter().find(|s| s.is_primary).or(sents.first());
+            if let Some(s) = sentence {
+                let word = &s.surface_form;
+                if let Some(idx) = s.text.find(word.as_str()) {
+                    format!("{}<b>{}</b>{}", &s.text[..idx], word, &s.text[idx + word.len()..])
+                } else {
+                    s.text.clone()
+                }
             } else {
                 card.lemma.clone()
             }
