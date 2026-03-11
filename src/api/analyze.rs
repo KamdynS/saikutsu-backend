@@ -1145,7 +1145,8 @@ pub async fn create_cards_from_analysis(
             None
         };
 
-        if is_japanese(language) && definitions.is_empty() {
+        // Skip Japanese words with no definition AND no i+1 sentence
+        if is_japanese(language) && definitions.is_empty() && !has_i1 {
             continue;
         }
 
