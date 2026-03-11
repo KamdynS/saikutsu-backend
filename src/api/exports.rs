@@ -391,16 +391,17 @@ fn populate_cards_and_notes(
         let note_id = now * 1000 + i as i64;
         let card_id_int = note_id + 1;
 
-        // Build front: sentence with target word bolded, or just the word
+        // Build front: sentence with target word bolded + parenthesized, or just the word
         let card_sentences = sentences_by_card.get(&card.id);
         let front = if let Some(sents) = card_sentences {
             let sentence = sents.iter().find(|s| s.is_primary).or(sents.first());
             if let Some(s) = sentence {
+                let clean = strip_parenthesized_tags(&s.text);
                 let word = &s.surface_form;
-                if let Some(idx) = s.text.find(word.as_str()) {
-                    format!("{}<b>{}</b>{}", &s.text[..idx], word, &s.text[idx + word.len()..])
+                if let Some(idx) = clean.find(word.as_str()) {
+                    format!("{}<b>({})</b>{}", &clean[..idx], word, &clean[idx + word.len()..])
                 } else {
-                    s.text.clone()
+                    clean
                 }
             } else {
                 card.lemma.clone()
@@ -437,6 +438,28 @@ fn populate_cards_and_notes(
     }
 
     Ok(())
+}
+
+/// Strip all bracketed content from subtitle text: （...）, (...), [...], 【...】
+fn strip_parenthesized_tags(text: &str) -> String {
+    let pairs: &[(char, char)] = &[
+        ('（', '）'),
+        ('(', ')'),
+        ('[', ']'),
+        ('【', '】'),
+    ];
+    let mut result = text.to_string();
+    for &(open, close) in pairs {
+        while let Some(start) = result.find(open) {
+            if let Some(end_offset) = result[start..].find(close) {
+                let end = start + end_offset + close.len_utf8();
+                result = format!("{}{}", &result[..start], result[end..].trim_start());
+            } else {
+                break;
+            }
+        }
+    }
+    result.trim().to_string()
 }
 
 fn simple_csum(s: &str) -> i64 {
