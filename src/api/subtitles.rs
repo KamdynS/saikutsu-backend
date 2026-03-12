@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 use crate::{
     api::middleware::AuthUser,
-    api::analyze::{analyze_text_core, create_cards_from_analysis, detect_language, DeckType},
+    services::analyze_service::{analyze_text_core, detect_language, DeckType},
+    services::card_creation::create_cards_from_analysis,
     api::settings::get_decrypted_key,
     error::{AppError, AppResult},
     models::Deck,

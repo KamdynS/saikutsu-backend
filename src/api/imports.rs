@@ -11,11 +11,14 @@ use std::time::Instant;
 use zip::ZipArchive;
 
 use crate::{
-    api::analyze::{self, CreateDeckResult},
     api::middleware::AuthUser,
     error::{AppError, AppResult},
     models::{Deck, DeckResponse},
-    services::known_words_service,
+    services::{
+        analyze_service::{detect_language, is_cjk},
+        card_creation::CreateDeckResult,
+        known_words_service,
+    },
     AppState,
 };
 
@@ -236,7 +239,7 @@ pub async fn import_apkg(
         .take(50)
         .flat_map(|c| [c.lemma.as_str(), " "])
         .collect();
-    let language = analyze::detect_language(&sample_text, user_language.as_deref());
+    let language = detect_language(&sample_text, user_language.as_deref());
 
     // Create deck
     let db_start = Instant::now();
@@ -519,7 +522,7 @@ fn count_script_chars(text: &str) -> (usize, usize) {
     let mut cjk = 0;
     let mut latin = 0;
     for c in text.chars() {
-        if analyze::is_cjk(c) { cjk += 1; }
+        if is_cjk(c) { cjk += 1; }
         else if c.is_alphabetic() { latin += 1; }
     }
     (cjk, latin)
