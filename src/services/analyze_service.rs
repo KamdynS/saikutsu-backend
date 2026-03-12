@@ -6,6 +6,7 @@ use crate::{
     error::AppError,
     processing::{
         dictionary, frequency,
+        nlp_client,
         normalization::{normalize_lemma, strip_brackets},
         tokenizers::{EuropeanTokenizer, JapaneseTokenizer, Token},
     },
@@ -53,9 +54,12 @@ pub fn is_japanese(lang: &str) -> bool {
     lang == "ja"
 }
 
-/// Tokenize text using the appropriate tokenizer for the language.
-/// Uses cached JapaneseTokenizer to avoid expensive re-initialization.
-pub fn tokenize_text(text: &str, language: &str) -> Result<Vec<Token>, AppError> {
+fn is_european(lang: &str) -> bool {
+    matches!(lang, "es" | "fr" | "de" | "it" | "pt")
+}
+
+/// Tokenize text using the local (non-NLP) tokenizer. Used as fallback and for Japanese.
+pub fn tokenize_text_local(text: &str, language: &str) -> Result<Vec<Token>, AppError> {
     if is_japanese(language) {
         Ok(JapaneseTokenizer::global().tokenize(text))
     } else {
@@ -65,7 +69,7 @@ pub fn tokenize_text(text: &str, language: &str) -> Result<Vec<Token>, AppError>
     }
 }
 
-/// Split text into sentences, handling both Japanese and European punctuation
+/// Split text into sentences using local heuristics. Used as fallback and for Japanese.
 pub fn split_sentences(text: &str, language: &str) -> Vec<String> {
     if is_japanese(language) {
         split_sentences_japanese(text)
@@ -111,13 +115,23 @@ fn split_sentences_european(text: &str) -> Vec<String> {
     sentences
 }
 
+/// NLP service configuration for spaCy-based tokenization.
+pub struct NlpConfig<'a> {
+    pub client: &'a reqwest::Client,
+    pub base_url: &'a str,
+}
+
 /// Core analysis logic shared by PDF and text analysis.
 /// Tokenizes text only ONCE and maps tokens to sentences by substring matching,
 /// avoiding expensive per-sentence re-tokenization.
+///
+/// When `nlp` is Some and the language is European, uses the spaCy NLP service
+/// for tokenization (accurate POS + lemma). Falls back to local tokenizer on error.
 #[allow(clippy::type_complexity)]
-pub fn analyze_text_core(
+pub async fn analyze_text_core(
     full_text: &str,
     language: &str,
+    nlp: Option<NlpConfig<'_>>,
 ) -> Result<(Vec<Token>, Vec<String>, HashMap<String, Vec<String>>, HashMap<String, String>, HashMap<String, Vec<String>>, HashMap<String, HashSet<String>>), AppError> {
     let text = if language == "ja" {
         std::borrow::Cow::Owned(crate::processing::furigana::strip_furigana(full_text))
@@ -125,8 +139,28 @@ pub fn analyze_text_core(
         std::borrow::Cow::Borrowed(full_text)
     };
 
-    let sentences = split_sentences(&text, language);
-    let all_tokens = tokenize_text(&text, language)?;
+    // Try spaCy NLP service for European languages, fall back to local tokenizer
+    let (all_tokens, sentences) = if is_european(language) {
+        if let Some(ref nlp_cfg) = nlp {
+            match tokenize_with_nlp(nlp_cfg, &text, language).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::warn!("NLP service unavailable, falling back to local tokenizer: {}", e);
+                    let sentences = split_sentences(&text, language);
+                    let tokens = tokenize_text_local(&text, language)?;
+                    (tokens, sentences)
+                }
+            }
+        } else {
+            let sentences = split_sentences(&text, language);
+            let tokens = tokenize_text_local(&text, language)?;
+            (tokens, sentences)
+        }
+    } else {
+        let sentences = split_sentences(&text, language);
+        let tokens = tokenize_text_local(&text, language)?;
+        (tokens, sentences)
+    };
 
     let mut surface_forms: HashMap<String, Vec<String>> = HashMap::new();
     let mut pos_map: HashMap<String, String> = HashMap::new();
@@ -156,7 +190,9 @@ pub fn analyze_text_core(
         if clean.is_empty() || clean.chars().count() < 3 {
             continue;
         }
-        let tokens = tokenize_text(&clean, language)?;
+        // For sentence→lemma mapping, use local tokenizer (fast, and we just need
+        // to match surface forms to lemmas we already identified from the full-text pass)
+        let tokens = tokenize_text_local(&clean, language)?;
         let mut seen: HashSet<String> = HashSet::new();
         for token in &tokens {
             if token.is_content {
@@ -180,6 +216,39 @@ pub fn analyze_text_core(
     }
 
     Ok((all_tokens, sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas))
+}
+
+/// Tokenize text using the spaCy NLP service. Returns (tokens, sentences).
+async fn tokenize_with_nlp(
+    nlp: &NlpConfig<'_>,
+    text: &str,
+    language: &str,
+) -> Result<(Vec<Token>, Vec<String>), AppError> {
+    let stopwords_set: HashSet<&str> = EuropeanTokenizer::new(language)
+        .map(|t| t.get_stopwords().iter().copied().collect())
+        .unwrap_or_default();
+
+    let resp = nlp_client::tokenize(nlp.client, nlp.base_url, text, language)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("NLP service error: {}", e)))?;
+
+    let tokens: Vec<Token> = resp.tokens.into_iter().map(|t| {
+        let lower = t.surface.to_lowercase();
+        let is_content = !t.is_stop
+            && !stopwords_set.contains(lower.as_str())
+            && lower.chars().count() >= 2
+            && !lower.chars().all(|c| c.is_numeric());
+
+        Token {
+            surface: t.surface,
+            lemma: t.lemma,
+            reading: String::new(),
+            pos: t.pos,
+            is_content,
+        }
+    }).collect();
+
+    Ok((tokens, resp.sentences))
 }
 
 #[derive(Debug, Serialize)]
@@ -218,8 +287,11 @@ pub fn build_word_list(
         .into_iter()
         .map(|(lemma, wf)| {
             let dict_entry = dictionary::lookup(&lemma, language);
+            let pos = pos_map.get(&lemma).cloned().unwrap_or_default();
+
+            // Use POS-aware definitions when available
             let definitions = dict_entry
-                .map(|e| e.definitions.clone())
+                .map(|e| e.definitions_with_pos_preference(&pos))
                 .unwrap_or_default();
             let reading = if is_japanese(language) {
                 dict_entry
@@ -230,7 +302,7 @@ pub fn build_word_list(
             };
 
             WordInfo {
-                pos: pos_map.get(&lemma).cloned().unwrap_or_default(),
+                pos,
                 surface_forms: surface_forms.get(&lemma).cloned().unwrap_or_default(),
                 sentences: lemma_sentences.get(&lemma).cloned().unwrap_or_default(),
                 definitions,

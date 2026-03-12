@@ -14,12 +14,20 @@ use crate::{
     services::{
         analyze_service::{
             analyze_text_core, build_word_list, detect_language, parse_deck_types,
-            AnalysisResult, DeckType,
+            AnalysisResult, DeckType, NlpConfig,
         },
         card_creation::{create_cards_from_analysis, update_deck_descriptions, CreateDeckResult},
     },
     AppState,
 };
+
+/// Build NLP config from app state if NLP_SERVICE_URL is set.
+fn nlp_config(state: &AppState) -> Option<NlpConfig<'_>> {
+    state.config.nlp_service_url.as_ref().map(|url| NlpConfig {
+        client: &state.http_client,
+        base_url: url.as_str(),
+    })
+}
 
 #[derive(Debug, Deserialize)]
 pub struct AnalyzeTextRequest {
@@ -83,7 +91,7 @@ pub async fn analyze_pdf(mut multipart: Multipart) -> AppResult<Json<AnalysisRes
     let sample_text: String = full_text.chars().take(500).collect();
 
     let (all_tokens, sentences, surface_forms, pos_map, lemma_sentences, _sentence_content_lemmas) =
-        analyze_text_core(&full_text, &language)?;
+        analyze_text_core(&full_text, &language, None).await?;
 
     let total_tokens = all_tokens.len();
     let content_token_count = all_tokens.iter().filter(|t| t.is_content).count();
@@ -131,7 +139,7 @@ pub async fn analyze_text(
     let sample_text: String = full_text.chars().take(500).collect();
 
     let (all_tokens, sentences, surface_forms, pos_map, lemma_sentences, _sentence_content_lemmas) =
-        analyze_text_core(&full_text, &language)?;
+        analyze_text_core(&full_text, &language, None).await?;
 
     let total_tokens = all_tokens.len();
     let content_token_count = all_tokens.iter().filter(|t| t.is_content).count();
@@ -185,7 +193,7 @@ pub async fn create_deck_from_text(
     let language = detect_language(&full_text, req.language.as_deref());
 
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
-        analyze_text_core(&full_text, &language)?;
+        analyze_text_core(&full_text, &language, nlp_config(&state)).await?;
 
     let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
@@ -376,7 +384,7 @@ pub async fn create_deck_from_pdf(
     let language = detect_language(&full_text, language_hint.as_deref());
 
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
-        analyze_text_core(&full_text, &language)?;
+        analyze_text_core(&full_text, &language, nlp_config(&state)).await?;
 
     let freq_map = frequency::count_lemmas(&all_tokens, &language);
 
@@ -591,7 +599,7 @@ pub async fn create_deck_from_media(
     let language = detect_language(&transcript, language_hint.as_deref());
 
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
-        analyze_text_core(&transcript, &language)?;
+        analyze_text_core(&transcript, &language, nlp_config(&state)).await?;
 
     let freq_map = frequency::count_lemmas(&all_tokens, &language);
 

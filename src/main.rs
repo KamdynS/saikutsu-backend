@@ -38,9 +38,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("Failed to load lemma dictionaries: {}. European lemmatization will fall back to lowercase forms.", e);
     }
 
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
     let state = Arc::new(AppState {
         db: pool,
         config: config.clone(),
+        http_client,
         jwks_cache: tokio::sync::RwLock::new(None),
         jimaku_semaphore: tokio::sync::Semaphore::new(1),
         opensub_semaphore: tokio::sync::Semaphore::new(1),

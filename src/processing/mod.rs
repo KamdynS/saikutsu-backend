@@ -8,3 +8,4 @@ pub mod normalization;
 pub mod furigana;
 pub mod encryption;
 pub mod subtitles;
+pub mod nlp_client;

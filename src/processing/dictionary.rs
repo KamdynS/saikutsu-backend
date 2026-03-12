@@ -2,10 +2,58 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+/// Dictionary entry with POS-grouped definitions.
+/// European languages use `pos_definitions` (POS → defs), loaded from POS-aware Wiktionary files.
+/// Japanese uses `definitions` (flat list), loaded from JMdict.
+/// At load time, one of these will be populated based on the JSON format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DictEntry {
     pub reading: String,
+    /// Flat definitions (JMdict format, or legacy Wiktionary)
+    #[serde(default)]
     pub definitions: Vec<String>,
+    /// POS-grouped definitions (new Wiktionary format: {"noun": [...], "verb": [...]})
+    #[serde(default)]
+    pub pos_definitions: HashMap<String, Vec<String>>,
+}
+
+impl DictEntry {
+    /// Get definitions for a specific POS tag.
+    /// Maps spaCy Universal POS tags to dictionary keys.
+    pub fn definitions_for_pos(&self, pos: &str) -> Option<Vec<String>> {
+        // If we have POS-grouped definitions, use them
+        if !self.pos_definitions.is_empty() {
+            let key = map_pos_to_dict_key(pos)?;
+            return self.pos_definitions.get(key).cloned();
+        }
+        None
+    }
+
+    /// Get all definitions regardless of POS (flat list or all POS groups combined).
+    pub fn all_definitions(&self) -> Vec<String> {
+        if !self.definitions.is_empty() {
+            return self.definitions.clone();
+        }
+        // Combine all POS-grouped definitions
+        self.pos_definitions.values().flatten().cloned().collect()
+    }
+
+    /// Get definitions with POS preference: try exact POS match first, fall back to all.
+    pub fn definitions_with_pos_preference(&self, pos: &str) -> Vec<String> {
+        self.definitions_for_pos(pos)
+            .unwrap_or_else(|| self.all_definitions())
+    }
+}
+
+/// Map spaCy Universal POS tags to dictionary definition keys.
+fn map_pos_to_dict_key(pos: &str) -> Option<&'static str> {
+    match pos {
+        "VERB" | "AUX" => Some("verb"),
+        "NOUN" | "PROPN" => Some("noun"),
+        "ADJ" => Some("adj"),
+        "ADV" => Some("adv"),
+        _ => None,
+    }
 }
 
 /// Language code → (word → entry)

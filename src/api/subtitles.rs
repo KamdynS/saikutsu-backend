@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     api::middleware::AuthUser,
-    services::analyze_service::{analyze_text_core, detect_language, DeckType},
+    services::analyze_service::{analyze_text_core, detect_language, DeckType, NlpConfig},
     services::card_creation::create_cards_from_analysis,
     api::settings::get_decrypted_key,
     error::{AppError, AppResult},
@@ -373,8 +373,13 @@ async fn run_subtitle_job(
 
     let language = detect_language(&subtitle_text, Some(&req.language));
 
+    let nlp = state.config.nlp_service_url.as_ref().map(|url| NlpConfig {
+        client: &state.http_client,
+        base_url: url.as_str(),
+    });
+
     let (all_tokens, _sentences, surface_forms, pos_map, lemma_sentences, sentence_content_lemmas) =
-        match analyze_text_core(&subtitle_text, &language) {
+        match analyze_text_core(&subtitle_text, &language, nlp).await {
             Ok(result) => result,
             Err(e) => {
                 tracing::error!(job_id = %job_id, error = %e, "subtitle job: analysis failed");

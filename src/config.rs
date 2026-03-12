@@ -10,6 +10,7 @@ pub struct Config {
     pub openai_api_key: Option<String>,
     pub opensubtitles_api_key: Option<String>,
     pub encryption_key: Option<String>,
+    pub nlp_service_url: Option<String>,
 }
 
 impl Config {
@@ -43,6 +44,7 @@ impl Config {
             openai_api_key: env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()),
             opensubtitles_api_key: env::var("OPENSUBTITLES_API_KEY").ok().filter(|s| !s.is_empty()),
             encryption_key: env::var("ENCRYPTION_KEY").ok().filter(|s| !s.is_empty()),
+            nlp_service_url: env::var("NLP_SERVICE_URL").ok().filter(|s| !s.is_empty()),
         })
     }
 }

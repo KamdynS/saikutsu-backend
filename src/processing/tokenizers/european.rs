@@ -143,7 +143,7 @@ impl EuropeanTokenizer {
         true
     }
 
-    fn get_stopwords(&self) -> &'static [&'static str] {
+    pub fn get_stopwords(&self) -> &'static [&'static str] {
         match self.language.as_str() {
             "es" => &[
                 "el", "la", "de", "que", "y", "a", "en", "un", "ser", "se", "no", "haber", "por",

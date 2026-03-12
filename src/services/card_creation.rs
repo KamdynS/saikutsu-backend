@@ -258,8 +258,9 @@ pub async fn create_cards_from_analysis(
         }
 
         let dict_entry = dictionary::lookup(lemma, language);
+        let pos_tag = pos_map.get(lemma).map(|s| s.as_str()).unwrap_or("");
         let definitions = dict_entry
-            .map(|e| e.definitions.join("; "))
+            .map(|e| e.definitions_with_pos_preference(pos_tag).join("; "))
             .unwrap_or_default();
         let reading = if is_japanese(language) {
             dict_entry.map(|e| e.reading.clone())
