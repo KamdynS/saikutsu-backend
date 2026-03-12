@@ -21,8 +21,23 @@ pub fn is_media(filename: &str) -> bool {
     is_video(filename) || is_audio(filename)
 }
 
+/// Guess MIME type from filename extension
+fn mime_type(filename: &str) -> &'static str {
+    let lower = filename.to_lowercase();
+    if lower.ends_with(".mp4") { "video/mp4" }
+    else if lower.ends_with(".mkv") { "video/x-matroska" }
+    else if lower.ends_with(".webm") { "video/webm" }
+    else if lower.ends_with(".mov") { "video/quicktime" }
+    else if lower.ends_with(".mp3") { "audio/mpeg" }
+    else if lower.ends_with(".m4a") { "audio/mp4" }
+    else if lower.ends_with(".wav") { "audio/wav" }
+    else if lower.ends_with(".ogg") { "audio/ogg" }
+    else if lower.ends_with(".flac") { "audio/flac" }
+    else { "application/octet-stream" }
+}
+
 /// Get media duration in seconds using ffprobe
-pub async fn get_duration(path: &Path) -> Result<f64> {
+async fn get_duration(path: &Path) -> Result<f64> {
     let output = tokio::process::Command::new("ffprobe")
         .args([
             "-v", "error",
@@ -32,7 +47,7 @@ pub async fn get_duration(path: &Path) -> Result<f64> {
         .arg(path)
         .output()
         .await
-        .context("Failed to run ffprobe")?;
+        .context("Failed to run ffprobe — is ffmpeg installed?")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -47,11 +62,9 @@ pub async fn get_duration(path: &Path) -> Result<f64> {
 }
 
 /// Extract audio from video file, converting to 16kHz mono mp3
-pub async fn extract_audio(video_path: &Path, output_path: &Path) -> Result<()> {
-    let status = tokio::process::Command::new("ffmpeg")
-        .args([
-            "-i",
-        ])
+async fn extract_audio(video_path: &Path, output_path: &Path) -> Result<()> {
+    let output = tokio::process::Command::new("ffmpeg")
+        .arg("-i")
         .arg(video_path)
         .args([
             "-vn",
@@ -64,19 +77,20 @@ pub async fn extract_audio(video_path: &Path, output_path: &Path) -> Result<()> 
         .arg(output_path)
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .status()
+        .output()
         .await
-        .context("Failed to run ffmpeg")?;
+        .context("Failed to run ffmpeg — is ffmpeg installed?")?;
 
-    if !status.success() {
-        anyhow::bail!("ffmpeg audio extraction failed");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ffmpeg audio extraction failed: {}", stderr);
     }
 
     Ok(())
 }
 
 /// Split audio file into chunks under 25MB
-pub async fn split_audio(audio_path: &Path, temp_dir: &Path) -> Result<Vec<PathBuf>> {
+async fn split_audio(audio_path: &Path, temp_dir: &Path) -> Result<Vec<PathBuf>> {
     let file_size = tokio::fs::metadata(audio_path).await?.len();
 
     if file_size <= MAX_CHUNK_SIZE {
@@ -87,15 +101,21 @@ pub async fn split_audio(audio_path: &Path, temp_dir: &Path) -> Result<Vec<PathB
     let num_chunks = (file_size as f64 / MAX_CHUNK_SIZE as f64).ceil() as u64;
     let chunk_duration = duration / num_chunks as f64;
 
+    tracing::info!(
+        file_size_mb = file_size as f64 / (1024.0 * 1024.0),
+        duration_s = duration,
+        num_chunks = num_chunks,
+        chunk_duration_s = chunk_duration,
+        "Splitting audio into chunks"
+    );
+
     let mut chunks = Vec::new();
     for i in 0..num_chunks {
         let start = i as f64 * chunk_duration;
         let chunk_path = temp_dir.join(format!("chunk_{:03}.mp3", i));
 
-        let status = tokio::process::Command::new("ffmpeg")
-            .args([
-                "-i",
-            ])
+        let output = tokio::process::Command::new("ffmpeg")
+            .arg("-i")
             .arg(audio_path)
             .args([
                 "-ss", &format!("{:.3}", start),
@@ -109,12 +129,13 @@ pub async fn split_audio(audio_path: &Path, temp_dir: &Path) -> Result<Vec<PathB
             .arg(&chunk_path)
             .stderr(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .status()
+            .output()
             .await
             .context("Failed to run ffmpeg for chunking")?;
 
-        if !status.success() {
-            anyhow::bail!("ffmpeg chunking failed for chunk {}", i);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("ffmpeg chunking failed for chunk {}: {}", i, stderr);
         }
 
         chunks.push(chunk_path);
@@ -124,7 +145,7 @@ pub async fn split_audio(audio_path: &Path, temp_dir: &Path) -> Result<Vec<PathB
 }
 
 /// Transcribe a single audio chunk using OpenAI's API
-pub async fn transcribe_chunk(
+async fn transcribe_chunk(
     client: &reqwest::Client,
     api_key: &str,
     audio_path: &Path,
@@ -138,8 +159,8 @@ pub async fn transcribe_chunk(
         .to_string();
 
     let file_part = multipart::Part::bytes(file_bytes)
-        .file_name(file_name)
-        .mime_str("audio/mpeg")?;
+        .file_name(file_name.clone())
+        .mime_str(mime_type(&file_name))?;
 
     let mut form = multipart::Form::new()
         .text("model", "gpt-4o-mini-transcribe")
@@ -172,7 +193,7 @@ pub async fn transcribe_chunk(
     Ok(result.text)
 }
 
-/// Full transcription pipeline: save → extract audio (if video) → chunk → transcribe → concatenate
+/// Full transcription pipeline: save → extract audio (if video) → chunk → transcribe
 pub async fn transcribe_media(
     file_bytes: &[u8],
     filename: &str,
@@ -186,7 +207,7 @@ pub async fn transcribe_media(
     // Get duration
     let duration = get_duration(&input_path).await?;
 
-    // Extract audio if video
+    // Extract audio if video (strips video track, compresses to small mp3)
     let audio_path = if is_video(filename) {
         let extracted = temp_dir.path().join("extracted.mp3");
         extract_audio(&input_path, &extracted).await?;
@@ -195,14 +216,16 @@ pub async fn transcribe_media(
         input_path.clone()
     };
 
-    // Split into chunks if needed
+    // Split into chunks if needed (>24MB)
     let chunks = split_audio(&audio_path, temp_dir.path()).await?;
+    tracing::info!(chunks = chunks.len(), "Transcribing media");
 
     // Transcribe each chunk
     let client = reqwest::Client::new();
     let mut transcript_parts = Vec::new();
 
-    for chunk_path in &chunks {
+    for (i, chunk_path) in chunks.iter().enumerate() {
+        tracing::info!(chunk = i + 1, total = chunks.len(), "Transcribing chunk");
         let text = transcribe_chunk(&client, api_key, chunk_path, language).await?;
         transcript_parts.push(text);
     }
