@@ -190,22 +190,30 @@ pub async fn analyze_text_core(
     let mut lemma_sentences: HashMap<String, Vec<String>> = HashMap::new();
     let mut sentence_content_lemmas: HashMap<String, HashSet<String>> = HashMap::new();
 
+    // Build reverse map: surface_form → lemma (for sentence matching)
+    let mut surface_to_lemma: HashMap<String, String> = HashMap::new();
+    for (lemma, surfaces) in &surface_forms {
+        for surface in surfaces {
+            surface_to_lemma.insert(surface.to_lowercase(), lemma.clone());
+        }
+    }
+
     for sentence in &sentences {
-        // Strip bracketed content (speaker tags, SFX labels) before tokenizing
+        // Strip bracketed content (speaker tags, SFX labels) before matching
         // so words inside brackets like （禰豆子のうなり声） don't get matched
         let clean = strip_brackets(sentence);
         if clean.is_empty() || clean.chars().count() < 3 {
             continue;
         }
-        // For sentence→lemma mapping, use local tokenizer (fast, and we just need
-        // to match surface forms to lemmas we already identified from the full-text pass)
-        let tokens = tokenize_text_local(&clean, language)?;
+        // Match lemmas to sentences using surface forms from the full-text tokenization.
+        // This ensures we use the same lemma mapping (from spaCy or local) consistently,
+        // avoiding mismatches when spaCy gives different lemmas than the local tokenizer.
         let mut seen: HashSet<String> = HashSet::new();
-        for token in &tokens {
-            if token.is_content {
-                let norm = normalize_lemma(&token.lemma, language);
-                if seen.insert(norm.clone()) {
-                    lemma_sentences.entry(norm).or_default().push(clean.clone());
+        let lower_clean = clean.to_lowercase();
+        for (surface_lower, lemma) in &surface_to_lemma {
+            if lower_clean.contains(surface_lower.as_str()) {
+                if seen.insert(lemma.clone()) {
+                    lemma_sentences.entry(lemma.clone()).or_default().push(clean.clone());
                 }
             }
         }
