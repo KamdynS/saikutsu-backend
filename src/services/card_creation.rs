@@ -8,10 +8,25 @@ use crate::{
     api::middleware::AuthUser,
     error::AppResult,
     models::Deck,
-    processing::{dictionary, normalization::normalize_lemma},
+    processing::{dictionary, frequency, normalization::normalize_lemma},
     services::{analyze_service::{is_japanese, DeckType}, known_words_service},
     AppState,
 };
+
+/// Filters applied during deck creation to control which words get included.
+#[derive(Debug, Default, Clone, serde::Deserialize, Serialize)]
+pub struct CardFilters {
+    /// Minimum number of occurrences in the source text (default: 1)
+    pub min_frequency: Option<i32>,
+    /// Maximum number of words to include (default: unlimited)
+    pub max_words: Option<usize>,
+    /// Only include words that have a dictionary definition (default: false)
+    #[serde(default)]
+    pub require_definition: bool,
+    /// Only include words within the top N most common words in the language
+    /// (based on JMdict priority tags for Japanese, OpenSubtitles corpus for European languages)
+    pub max_corpus_rank: Option<i32>,
+}
 
 pub struct CardCreationResult {
     pub cards_created: usize,
@@ -79,6 +94,7 @@ pub async fn create_cards_from_analysis(
     lemma_sentences: &HashMap<String, Vec<String>>,
     sentence_content_lemmas: &HashMap<String, HashSet<String>>,
     language: &str,
+    filters: Option<&CardFilters>,
 ) -> AppResult<CardCreationResult> {
     let start = Instant::now();
 
@@ -243,11 +259,42 @@ pub async fn create_cards_from_analysis(
 
     let mut word_data_list: Vec<WordData> = Vec::new();
 
+    let min_freq = filters.and_then(|f| f.min_frequency).unwrap_or(1);
+    let max_words_limit = filters.and_then(|f| f.max_words);
+    let require_def = filters.map(|f| f.require_definition).unwrap_or(false);
+    let max_corpus_rank = filters.and_then(|f| f.max_corpus_rank);
+    let corpus_freq_map = if max_corpus_rank.is_some() {
+        Some(frequency::corpus_freq(language))
+    } else {
+        None
+    };
+
     for (rank, (lemma, count)) in words.iter().enumerate() {
+        // Apply max_words cap
+        if let Some(max) = max_words_limit {
+            if word_data_list.len() >= max {
+                break;
+            }
+        }
+
         let normalized = normalize_lemma(lemma, language);
         if existing_lemmas.contains(&normalized) {
             words_skipped_duplicate += 1;
             continue;
+        }
+
+        // Apply min_frequency filter
+        if *count < min_freq {
+            continue;
+        }
+
+        // Apply corpus rank filter (only include words in top N most common)
+        if let (Some(max_rank), Some(freq_map)) = (max_corpus_rank, corpus_freq_map) {
+            let rank = freq_map.get(lemma).or_else(|| freq_map.get(&normalized));
+            match rank {
+                Some(&r) if r <= max_rank => {} // word is common enough, keep it
+                _ => continue, // word is too rare or not in corpus, skip
+            }
         }
 
         let has_i1 = i_plus_one_map.contains_key(lemma);
@@ -267,6 +314,11 @@ pub async fn create_cards_from_analysis(
         } else {
             None
         };
+
+        // Apply require_definition filter
+        if require_def && definitions.is_empty() {
+            continue;
+        }
 
         // Skip Japanese words with no definition AND no i+1 sentence
         if is_japanese(language) && definitions.is_empty() && !has_i1 {

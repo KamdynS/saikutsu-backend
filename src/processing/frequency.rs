@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use super::normalization::normalize_lemma;
 use super::tokenizers::Token;
@@ -62,4 +63,47 @@ pub fn rank_by_frequency(
     });
 
     words
+}
+
+// ── Corpus frequency lists (loaded once from data/frequency/*.json) ──
+
+type FreqMap = HashMap<String, i32>;
+
+static FREQ_JA: OnceLock<FreqMap> = OnceLock::new();
+static FREQ_ES: OnceLock<FreqMap> = OnceLock::new();
+static FREQ_FR: OnceLock<FreqMap> = OnceLock::new();
+static FREQ_DE: OnceLock<FreqMap> = OnceLock::new();
+static FREQ_IT: OnceLock<FreqMap> = OnceLock::new();
+static FREQ_PT: OnceLock<FreqMap> = OnceLock::new();
+
+fn load_freq_file(path: &str) -> FreqMap {
+    match std::fs::read_to_string(path) {
+        Ok(data) => {
+            let map: HashMap<String, i32> = serde_json::from_str(&data).unwrap_or_default();
+            tracing::info!(path = path, entries = map.len(), "loaded corpus frequency list");
+            map
+        }
+        Err(e) => {
+            tracing::warn!(path = path, error = %e, "corpus frequency file not found");
+            HashMap::new()
+        }
+    }
+}
+
+/// Get the corpus frequency map for a language. Loaded lazily on first access.
+pub fn corpus_freq(language: &str) -> &'static FreqMap {
+    match language {
+        "ja" => FREQ_JA.get_or_init(|| load_freq_file("data/frequency/ja.json")),
+        "es" => FREQ_ES.get_or_init(|| load_freq_file("data/frequency/es.json")),
+        "fr" => FREQ_FR.get_or_init(|| load_freq_file("data/frequency/fr.json")),
+        "de" => FREQ_DE.get_or_init(|| load_freq_file("data/frequency/de.json")),
+        "it" => FREQ_IT.get_or_init(|| load_freq_file("data/frequency/it.json")),
+        "pt" => FREQ_PT.get_or_init(|| load_freq_file("data/frequency/pt.json")),
+        _ => FREQ_JA.get_or_init(|| load_freq_file("data/frequency/ja.json")),
+    }
+}
+
+/// Look up the corpus rank for a word. Returns None if not in the frequency list.
+pub fn corpus_rank(word: &str, language: &str) -> Option<i32> {
+    corpus_freq(language).get(word).copied()
 }

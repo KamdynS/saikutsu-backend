@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     api::middleware::AuthUser,
     services::analyze_service::{analyze_text_core, detect_language, DeckType, NlpConfig},
-    services::card_creation::create_cards_from_analysis,
+    services::card_creation::{create_cards_from_analysis, CardFilters},
     api::settings::get_decrypted_key,
     error::{AppError, AppResult},
     models::Deck,
@@ -188,6 +188,8 @@ pub struct CreateDeckFromSubtitlesRequest {
     pub file_ids: Option<Vec<String>>,
     /// For Jimaku: specific file URLs to download (if empty, downloads all for the entry)
     pub file_urls: Option<Vec<String>>,
+    #[serde(default)]
+    pub filters: Option<CardFilters>,
 }
 
 #[derive(Debug, Serialize)]
@@ -466,7 +468,7 @@ async fn run_subtitle_job(
         def_deck_ref.map(|i| &created_decks[i]),
         &words,
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
-        &sentence_content_lemmas, &language,
+        &sentence_content_lemmas, &language, req.filters.as_ref(),
     ).await
     .map_err(|e| anyhow::anyhow!("Card creation failed: {}", e))?;
 

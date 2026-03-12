@@ -16,7 +16,7 @@ use crate::{
             analyze_text_core, build_word_list, detect_language, parse_deck_types,
             AnalysisResult, DeckType, NlpConfig,
         },
-        card_creation::{create_cards_from_analysis, update_deck_descriptions, CreateDeckResult},
+        card_creation::{create_cards_from_analysis, update_deck_descriptions, CardFilters, CreateDeckResult},
     },
     AppState,
 };
@@ -43,9 +43,8 @@ pub struct CreateDeckFromTextRequest {
     #[serde(default)]
     pub deck_types: Vec<DeckType>,
     pub language: Option<String>,
-    // Kept for backward compat, ignored
-    #[allow(dead_code)]
-    pub max_words: Option<usize>,
+    #[serde(default)]
+    pub filters: Option<CardFilters>,
 }
 
 pub async fn analyze_pdf(mut multipart: Multipart) -> AppResult<Json<AnalysisResult>> {
@@ -180,6 +179,7 @@ pub async fn create_deck_from_text(
 
     let full_text = req.text;
     let deck_name = req.name;
+    let filters = req.filters;
     let deck_types = if req.deck_types.is_empty() {
         vec![DeckType::WordDefinition]
     } else {
@@ -266,7 +266,7 @@ pub async fn create_deck_from_text(
         def_deck_ref.map(|i| &created_decks[i]),
         &words,
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
-        &sentence_content_lemmas, &language,
+        &sentence_content_lemmas, &language, filters.as_ref(),
     ).await?;
 
     // If no cards were created, delete the empty decks and return error
@@ -325,6 +325,7 @@ pub async fn create_deck_from_pdf(
     let mut deck_name: Option<String> = None;
     let mut deck_types: Vec<DeckType> = Vec::new();
     let mut language_hint: Option<String> = None;
+    let mut filters: Option<CardFilters> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().map(|s| s.to_string());
@@ -360,7 +361,13 @@ pub async fn create_deck_from_pdf(
                     .map_err(|e| AppError::BadRequest(format!("Failed to read language: {}", e)))?;
                 language_hint = Some(text);
             }
-            // Ignore max_words for backward compat
+            Some("filters") => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read filters: {}", e)))?;
+                filters = serde_json::from_str(&text).ok();
+            }
             _ => {}
         }
     }
@@ -456,7 +463,7 @@ pub async fn create_deck_from_pdf(
         def_deck_ref.map(|i| &created_decks[i]),
         &words,
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
-        &sentence_content_lemmas, &language,
+        &sentence_content_lemmas, &language, filters.as_ref(),
     ).await?;
 
     // If no cards were created, delete the empty decks and return error
@@ -519,6 +526,7 @@ pub async fn create_deck_from_media(
     let mut deck_name: Option<String> = None;
     let mut deck_types: Vec<DeckType> = Vec::new();
     let mut language_hint: Option<String> = None;
+    let mut filters: Option<CardFilters> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().map(|s| s.to_string());
@@ -554,7 +562,13 @@ pub async fn create_deck_from_media(
                     .map_err(|e| AppError::BadRequest(format!("Failed to read language: {}", e)))?;
                 language_hint = Some(text);
             }
-            // Ignore max_words for backward compat
+            Some("filters") => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read filters: {}", e)))?;
+                filters = serde_json::from_str(&text).ok();
+            }
             _ => {}
         }
     }
@@ -674,7 +688,7 @@ pub async fn create_deck_from_media(
         def_deck_ref.map(|i| &created_decks[i]),
         &words,
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
-        &sentence_content_lemmas, &language,
+        &sentence_content_lemmas, &language, filters.as_ref(),
     ).await?;
 
     // If no cards were created, delete the empty decks and return error
