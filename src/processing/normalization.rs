@@ -46,3 +46,24 @@ pub fn strip_brackets(text: &str) -> String {
     }
     result.trim().to_string()
 }
+
+/// Clean text for NLP processing: strip subtitle dialogue dashes, normalize whitespace.
+/// Subtitle lines often start with "- " or "– " to indicate speaker changes.
+pub fn clean_for_nlp(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            // Strip leading dialogue dashes (-, –, —) optionally followed by space
+            let stripped = trimmed
+                .strip_prefix("— ")
+                .or_else(|| trimmed.strip_prefix("– "))
+                .or_else(|| trimmed.strip_prefix("- "))
+                .or_else(|| trimmed.strip_prefix('—'))
+                .or_else(|| trimmed.strip_prefix('–'))
+                .or_else(|| trimmed.strip_prefix('-').filter(|s| s.starts_with(|c: char| c.is_alphabetic() || c == '¡' || c == '¿')))
+                .unwrap_or(trimmed);
+            stripped.trim()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}

@@ -7,7 +7,7 @@ use crate::{
     processing::{
         dictionary, frequency,
         nlp_client,
-        normalization::{normalize_lemma, strip_brackets},
+        normalization::{clean_for_nlp, normalize_lemma, strip_brackets},
         tokenizers::{EuropeanTokenizer, JapaneseTokenizer, Token},
     },
 };
@@ -139,21 +139,28 @@ pub async fn analyze_text_core(
         std::borrow::Cow::Borrowed(full_text)
     };
 
+    // Clean dialogue markers (subtitle dashes) before NLP processing
+    let cleaned_text = if is_european(language) {
+        std::borrow::Cow::Owned(clean_for_nlp(&text))
+    } else {
+        std::borrow::Cow::Borrowed(text.as_ref())
+    };
+
     // Try spaCy NLP service for European languages, fall back to local tokenizer
     let (all_tokens, sentences) = if is_european(language) {
         if let Some(ref nlp_cfg) = nlp {
-            match tokenize_with_nlp(nlp_cfg, &text, language).await {
+            match tokenize_with_nlp(nlp_cfg, &cleaned_text, language).await {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::warn!("NLP service unavailable, falling back to local tokenizer: {}", e);
-                    let sentences = split_sentences(&text, language);
-                    let tokens = tokenize_text_local(&text, language)?;
+                    let sentences = split_sentences(&cleaned_text, language);
+                    let tokens = tokenize_text_local(&cleaned_text, language)?;
                     (tokens, sentences)
                 }
             }
         } else {
-            let sentences = split_sentences(&text, language);
-            let tokens = tokenize_text_local(&text, language)?;
+            let sentences = split_sentences(&cleaned_text, language);
+            let tokens = tokenize_text_local(&cleaned_text, language)?;
             (tokens, sentences)
         }
     } else {
@@ -232,20 +239,36 @@ async fn tokenize_with_nlp(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("NLP service error: {}", e)))?;
 
-    let tokens: Vec<Token> = resp.tokens.into_iter().map(|t| {
+    let tokens: Vec<Token> = resp.tokens.into_iter().filter_map(|t| {
+        // Skip tokens with leading punctuation (dialogue dashes that survived cleaning)
+        let first_char = t.surface.chars().next()?;
+        if first_char == '-' || first_char == '–' || first_char == '—' {
+            return None;
+        }
+
+        // Skip tokens that contain spaces (spaCy merged multiple words)
+        if t.lemma.contains(' ') {
+            return None;
+        }
+
+        // Skip tokens that are purely punctuation
+        if t.surface.chars().all(|c| !c.is_alphanumeric()) {
+            return None;
+        }
+
         let lower = t.surface.to_lowercase();
         let is_content = !t.is_stop
             && !stopwords_set.contains(lower.as_str())
             && lower.chars().count() >= 2
             && !lower.chars().all(|c| c.is_numeric());
 
-        Token {
+        Some(Token {
             surface: t.surface,
             lemma: t.lemma,
             reading: String::new(),
             pos: t.pos,
             is_content,
-        }
+        })
     }).collect();
 
     Ok((tokens, resp.sentences))

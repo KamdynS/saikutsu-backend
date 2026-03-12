@@ -57,12 +57,13 @@ impl JapaneseTokenizer {
                     .unwrap_or_default();
 
                 let is_content = Self::is_content_word(&pos, &details);
+                let universal_pos = Self::to_universal_pos(&pos, &details);
 
                 tokens.push(Token {
                     surface,
                     lemma,
                     reading,
-                    pos,
+                    pos: universal_pos,
                     is_content,
                 });
             }
@@ -93,6 +94,30 @@ impl JapaneseTokenizer {
         }
 
         true
+    }
+
+    /// Map IPADIC POS tags to Universal POS tags for consistent display.
+    fn to_universal_pos(pos: &str, details: &[String]) -> String {
+        let sub_pos = details.get(1).map(|s| s.as_str()).unwrap_or("");
+        match pos {
+            "名詞" => match sub_pos {
+                "固有名詞" => "PROPN",
+                "代名詞" => "PRON",
+                "数" => "NUM",
+                "接尾" => "NOUN",
+                _ => "NOUN",
+            },
+            "動詞" => "VERB",
+            "形容詞" => "ADJ",
+            "副詞" => "ADV",
+            "助詞" => "ADP",
+            "助動詞" => "AUX",
+            "接続詞" => "CCONJ",
+            "感動詞" => "INTJ",
+            "連体詞" => "DET",
+            "記号" => "PUNCT",
+            _ => "X",
+        }.to_string()
     }
 
     fn katakana_to_hiragana(text: &str) -> String {
