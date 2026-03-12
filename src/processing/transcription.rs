@@ -164,6 +164,7 @@ async fn transcribe_chunk(
 
     let mut form = multipart::Form::new()
         .text("model", "gpt-4o-mini-transcribe")
+        .text("prompt", "Please include proper punctuation in the transcription.")
         .part("file", file_part);
 
     if let Some(lang) = language {

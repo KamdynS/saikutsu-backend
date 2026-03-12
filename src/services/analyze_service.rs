@@ -83,6 +83,14 @@ fn split_sentences_japanese(text: &str) -> Vec<String> {
     let mut current = String::new();
 
     for c in text.chars() {
+        if c == '\n' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() && trimmed.chars().count() > 5 {
+                sentences.push(trimmed);
+            }
+            current = String::new();
+            continue;
+        }
         current.push(c);
         if c == '。' || c == '！' || c == '？' || c == '!' || c == '?' {
             let trimmed = current.trim().to_string();
@@ -93,6 +101,12 @@ fn split_sentences_japanese(text: &str) -> Vec<String> {
         }
     }
 
+    // Don't forget trailing text without punctuation
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() && trimmed.chars().count() > 5 {
+        sentences.push(trimmed);
+    }
+
     sentences
 }
 
@@ -101,6 +115,14 @@ fn split_sentences_european(text: &str) -> Vec<String> {
     let mut current = String::new();
 
     for c in text.chars() {
+        if c == '\n' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() && trimmed.split_whitespace().count() >= 3 {
+                sentences.push(trimmed);
+            }
+            current = String::new();
+            continue;
+        }
         current.push(c);
         if c == '.' || c == '!' || c == '?' {
             let trimmed = current.trim().to_string();
@@ -110,6 +132,12 @@ fn split_sentences_european(text: &str) -> Vec<String> {
             }
             current = String::new();
         }
+    }
+
+    // Don't forget trailing text without punctuation
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() && trimmed.split_whitespace().count() >= 3 {
+        sentences.push(trimmed);
     }
 
     sentences
