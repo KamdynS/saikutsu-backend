@@ -23,3 +23,26 @@ pub fn normalize_lemma(lemma: &str, language: &str) -> String {
     }
     result
 }
+
+/// Strip all bracketed content from subtitle text: （...）, (...), [...], 【...】
+/// Used to remove speaker tags, sound effect labels, etc. before tokenization/display.
+pub fn strip_brackets(text: &str) -> String {
+    let pairs: &[(char, char)] = &[
+        ('（', '）'),
+        ('(', ')'),
+        ('[', ']'),
+        ('【', '】'),
+    ];
+    let mut result = text.to_string();
+    for &(open, close) in pairs {
+        while let Some(start) = result.find(open) {
+            if let Some(end_offset) = result[start..].find(close) {
+                let end = start + end_offset + close.len_utf8();
+                result = format!("{}{}", &result[..start], result[end..].trim_start());
+            } else {
+                break;
+            }
+        }
+    }
+    result.trim().to_string()
+}

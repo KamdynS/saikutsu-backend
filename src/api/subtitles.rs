@@ -464,6 +464,23 @@ async fn run_subtitle_job(
     ).await
     .map_err(|e| anyhow::anyhow!("Card creation failed: {}", e))?;
 
+    // If no cards were created, delete the empty decks and report as error
+    if result.cards_created == 0 {
+        for deck in &created_decks {
+            let _ = sqlx::query("DELETE FROM decks WHERE id = $1")
+                .bind(deck.id)
+                .execute(&state.db)
+                .await;
+        }
+        let msg = if result.words_skipped_duplicate > 0 {
+            format!("All {} words are already in your decks", result.words_skipped_duplicate)
+        } else {
+            "No new vocabulary found in these subtitles".to_string()
+        };
+        update_job_failed(&state.db, job_id, &msg).await;
+        anyhow::bail!(msg);
+    }
+
     // Update deck descriptions with actual per-deck card counts
     let skipped = result.words_skipped_duplicate;
     for deck in &created_decks {

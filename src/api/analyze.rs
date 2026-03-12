@@ -11,7 +11,7 @@ use crate::{
     api::middleware::AuthUser,
     error::{AppError, AppResult},
     models::{Deck, DeckResponse},
-    processing::{dictionary, frequency, normalization::normalize_lemma, pdf, transcription, tokenizers::{EuropeanTokenizer, JapaneseTokenizer, Token}},
+    processing::{dictionary, frequency, normalization::{normalize_lemma, strip_brackets}, pdf, transcription, tokenizers::{EuropeanTokenizer, JapaneseTokenizer, Token}},
     services::known_words_service,
     AppState,
 };
@@ -205,17 +205,23 @@ pub fn analyze_text_core(
     let mut sentence_content_lemmas: HashMap<String, HashSet<String>> = HashMap::new();
 
     for sentence in &sentences {
-        let tokens = tokenize_text(sentence, language)?;
+        // Strip bracketed content (speaker tags, SFX labels) before tokenizing
+        // so words inside brackets like （禰豆子のうなり声） don't get matched
+        let clean = strip_brackets(sentence);
+        if clean.is_empty() || clean.chars().count() < 3 {
+            continue;
+        }
+        let tokens = tokenize_text(&clean, language)?;
         let mut seen: HashSet<String> = HashSet::new();
         for token in &tokens {
             if token.is_content {
                 let norm = normalize_lemma(&token.lemma, language);
                 if seen.insert(norm.clone()) {
-                    lemma_sentences.entry(norm).or_default().push(sentence.clone());
+                    lemma_sentences.entry(norm).or_default().push(clean.clone());
                 }
             }
         }
-        sentence_content_lemmas.insert(sentence.clone(), seen);
+        sentence_content_lemmas.insert(clean, seen);
     }
     // Limit sentences per word
     for sents in lemma_sentences.values_mut() {
@@ -511,6 +517,22 @@ pub async fn create_deck_from_text(
         &sentence_content_lemmas, &language,
     ).await?;
 
+    // If no cards were created, delete the empty decks and return error
+    if result.cards_created == 0 {
+        for deck in &created_decks {
+            let _ = sqlx::query("DELETE FROM decks WHERE id = $1")
+                .bind(deck.id)
+                .execute(&state.db)
+                .await;
+        }
+        let msg = if result.words_skipped_duplicate > 0 {
+            format!("All {} words are already in your decks", result.words_skipped_duplicate)
+        } else {
+            "No new vocabulary found in this text".to_string()
+        };
+        return Err(AppError::BadRequest(msg));
+    }
+
     // Update descriptions with actual card counts (post-dedup)
     let skipped = result.words_skipped_duplicate;
     let new_words = result.cards_created;
@@ -684,6 +706,22 @@ pub async fn create_deck_from_pdf(
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
         &sentence_content_lemmas, &language,
     ).await?;
+
+    // If no cards were created, delete the empty decks and return error
+    if result.cards_created == 0 {
+        for deck in &created_decks {
+            let _ = sqlx::query("DELETE FROM decks WHERE id = $1")
+                .bind(deck.id)
+                .execute(&state.db)
+                .await;
+        }
+        let msg = if result.words_skipped_duplicate > 0 {
+            format!("All {} words are already in your decks", result.words_skipped_duplicate)
+        } else {
+            "No new vocabulary found in this file".to_string()
+        };
+        return Err(AppError::BadRequest(msg));
+    }
 
     // Update descriptions with actual card counts (post-dedup)
     let skipped = result.words_skipped_duplicate;
@@ -886,6 +924,22 @@ pub async fn create_deck_from_media(
         &deck_types, &surface_forms, &pos_map, &lemma_sentences,
         &sentence_content_lemmas, &language,
     ).await?;
+
+    // If no cards were created, delete the empty decks and return error
+    if result.cards_created == 0 {
+        for deck in &created_decks {
+            let _ = sqlx::query("DELETE FROM decks WHERE id = $1")
+                .bind(deck.id)
+                .execute(&state.db)
+                .await;
+        }
+        let msg = if result.words_skipped_duplicate > 0 {
+            format!("All {} words are already in your decks", result.words_skipped_duplicate)
+        } else {
+            "No new vocabulary found in this file".to_string()
+        };
+        return Err(AppError::BadRequest(msg));
+    }
 
     // Update descriptions with actual card counts (post-dedup)
     let skipped = result.words_skipped_duplicate;

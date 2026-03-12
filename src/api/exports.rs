@@ -17,6 +17,7 @@ use crate::{
     api::middleware::AuthUser,
     error::AppError,
     models::{Card, Deck, Sentence},
+    processing::normalization::strip_brackets,
     AppState,
 };
 
@@ -396,7 +397,7 @@ fn populate_cards_and_notes(
         let front = if let Some(sents) = card_sentences {
             let sentence = sents.iter().find(|s| s.is_primary).or(sents.first());
             if let Some(s) = sentence {
-                let clean = strip_parenthesized_tags(&s.text);
+                let clean = strip_brackets(&s.text);
                 let word = &s.surface_form;
                 if let Some(idx) = clean.find(word.as_str()) {
                     format!("{}<b>({})</b>{}", &clean[..idx], word, &clean[idx + word.len()..])
@@ -438,28 +439,6 @@ fn populate_cards_and_notes(
     }
 
     Ok(())
-}
-
-/// Strip all bracketed content from subtitle text: （...）, (...), [...], 【...】
-fn strip_parenthesized_tags(text: &str) -> String {
-    let pairs: &[(char, char)] = &[
-        ('（', '）'),
-        ('(', ')'),
-        ('[', ']'),
-        ('【', '】'),
-    ];
-    let mut result = text.to_string();
-    for &(open, close) in pairs {
-        while let Some(start) = result.find(open) {
-            if let Some(end_offset) = result[start..].find(close) {
-                let end = start + end_offset + close.len_utf8();
-                result = format!("{}{}", &result[..start], result[end..].trim_start());
-            } else {
-                break;
-            }
-        }
-    }
-    result.trim().to_string()
 }
 
 fn simple_csum(s: &str) -> i64 {
